@@ -51,16 +51,18 @@ flowchart TD
    - Push to `azure-rest-api-specs` and open a PR
    - CI validates automatically:
      - TypeSpec compilation
-     - TypeSpec LintDiff (guideline compliance)
+     - TypeSpec compilation (includes linting)
+     - Suppression review (guideline compliance)
      - Breaking change detection (Phase A + B)
      - APIView token generation (for SDK-level review at Stage 4)
      - SDK generation dry-run (spec-gen-sdk)
      - Labels applied based on results
 
 3. 🧑‍💻 **Wait for approvals** *(human gating)*
+   - **`PublishToCustomers` label** — required on all PRs targeting `main` or `RPSaaSMaster`. Author self-applies to acknowledge APIs are shipped to customers. Enforced by CI (`summarize-checks`). **Candidate for removal** -- redundant once other gates pass; causes service team confusion.
    - **Namespace approval** — required for first preview of new packages (`namespace-<lang>-pending` → `namespace-<lang>-approved`)
    - **ARM review** — required for ARM/management-plane specs (`ARM-Review-Required` → `ARMSignedOff`)
-   - **Breaking change review** — required for ARM specs with breaking changes (`BreakingChangeReviewRequired` → `Approved-BreakingChange`)
+   - **Breaking change review** — Spec-level: `BreakingChangeReviewRequired` label auto-applied by CI on any spec PR with breaking changes (review team defined for ARM, undefined for data-plane -- Gap #9). SDK-level: `BreakingChange-{Language}-Sdk` label applies to all specs.
    - > **Note**: There is no spec-level API review. API review happens only at the SDK level (Stage 4).
 
 4. **Spec PR merges → SDK generation is automatic**
@@ -92,7 +94,7 @@ flowchart TD
 1. **ARM review** (ARM specs only) — Review resource model correctness on spec PRs; apply `ARMSignedOff` label
 2. **SDK API review** — Review generated SDK API surface on SDK PRs via APIView (current) or API Review Hub review PRs (future). **There is no spec-level API review** — API review applies only to the generated SDK. **Current**: `<lang>-api-approved` labels applied manually by architects. **Future (ARH)**: `api-approved` label applied automatically via webhooks/GH App. Labels are **informational** — source of truth is the ARH database (API hash).
 3. **SDK PR review** (Haoling/Shanghai team, management plane only) — Review generated SDK PRs that have a release plan attached; approve & merge
-4. **Breaking change review** — Review breaking changes flagged by `BreakingChangeReviewRequired` label on spec PRs (ARM specs only)
+4. **Breaking change review** — Spec-level: `BreakingChangeReviewRequired` label on spec PRs (review team defined for ARM; data-plane routing is Gap #9). SDK-level: `BreakingChange-{Language}-Sdk` label on spec PRs (all specs).
 5. **Namespace review** — Approve new package namespaces; apply `namespace-<lang>-approved` labels
 6. **Release approval** — Approve release pipeline runs (Haoling/Shanghai team for ARM)
 
@@ -115,7 +117,7 @@ flowchart TD
 | Stage | Entry signal | Exit signal | Primary owner |
 |-------|-------------|------------|---------------|
 | 1. TypeSpec Authoring | Local TypeSpec change | PR-ready `.tsp` files | TypeSpec team / @prkannap |
-| 2. Spec PR Validation | PR opened in `azure-rest-api-specs` | CI pass + labels + approved | @raych1 / @catalinaperalta / EngSys |
+| 2. Spec PR Validation | PR opened in `azure-rest-api-specs` | CI pass + labels + approved | @raych1 / @chunyu3 / @catalinaperalta / EngSys |
 | 3. SDK Generation | Spec PR merged | SDK PRs created per language | spec-gen-sdk / EngSys |
 | 4. SDK PR Validation | SDK PR opened in language repo | PR approved & merged | Language teams / architects |
 | 5. Release Coordination | SDK PR merged | Packages published + KPI updated | Release tooling / EngSys |
@@ -132,7 +134,7 @@ flowchart TD
      │────────────────>│  CI triggers   │                │                │                │
      │                 │───────────────>│                │                │                │
      │                 │                │── Compile      │                │                │
-     │                 │                │── LintDiff     │                │                │
+     │                 │                │── Suppression  │                │                │
      │                 │                │── Breaking chg │                │                │
      │                 │                │── APIView gen  │                │                │
      │                 │                │── SDK dry-run  │                │                │
@@ -210,22 +212,17 @@ flowchart TD
 
 | Tool | Role | Owner |
 |------|------|-------|
-| TypeSpec compiler | Compile `.tsp` files, catch syntax/type errors | TypeSpec team |
-| TypeSpec linter | Static guideline compliance (distinct from LintDiff) | TypeSpec team |
+| TypeSpec compiler | Compile `.tsp` files, catch syntax/type errors. Lint rules run during compile. | TypeSpec team |
 | TypeSpec authoring agent (`azure-typespec-author` skill) | Assist with ARM/data-plane patterns, Azure REST API guidelines | Haoling/Shanghai |
 | `@azure-tools/typespec-breaking-change` | Phase A: same-version regression. Phase B: cross-version evolution. Inline suppression via decorators. | @markcowl |
 
 #### Gap
 
-Breaking change tool reports findings with DiffKind, source location, and suggested suppression decorator — but resolution is manual. No agent auto-resolves.
+Breaking change tool reports findings as diagnostics (diagnostic type + target location). Resolution is manual today; agent-assisted suppression is a future goal.
 
 #### Next step
 
-Build author-validation loop where agent auto-applies suppression decorators based on structured breaking change output.
-
-#### Open questions
-
-- [ ] Does `@azure-tools/typespec-breaking-change` output provide enough structured context for agent auto-resolution? Need confirmation from @markcowl.
+Build author-validation loop where agent auto-applies suppression decorators based on diagnostic type and target info. Structured JSON output is available from the tool if richer detail is needed.
 
 </details>
 
@@ -241,13 +238,13 @@ Build author-validation loop where agent auto-applies suppression decorators bas
 | **Purpose** | Validate spec PR: compile, lint, breaking changes, APIView tokens, SDK dry-run |
 | **Entry signal** | PR opened/updated in `azure-rest-api-specs` |
 | **Exit signal** | CI passes + review labels applied + approved & merged |
-| **Owners** | EngSys (pipeline), @raych1 / @markcowl (breaking change), TypeSpec team (lintdiff) |
+| **Owners** | EngSys (pipeline), @markcowl (spec breaking change), @chunyu3 / @raych1 (SDK breaking change), @catalinaperalta (suppression review), TypeSpec team (compiler/linting) |
 | **Reviewer ask** | Confirm CI ordering, label semantics, and blocking vs informational |
 
 #### Happy path
 
 1. PR opens → CI triggers automatically
-2. TypeSpec compiles → LintDiff runs → breaking change detection → APIView tokens generated → SDK dry-run → SDK APIView generated
+2. TypeSpec compiles (includes linting) → suppression review → breaking change detection → APIView tokens generated → SDK dry-run → SDK APIView generated
 3. Labels applied based on results
 4. ARM review (if ARM spec) + namespace approval (if new package)
 5. All approvals → PR merges
@@ -257,10 +254,10 @@ Build author-validation loop where agent auto-applies suppression decorators bas
 | Failure | Signal | Owner | Next action | Resolution |
 |---------|--------|-------|-------------|------------|
 | TypeSpec compile failure | CI red + compile error | Author | Fix TypeSpec | Manual |
-| LintDiff violation | CI warning/error | Author | Fix or request suppression | Manual |
-| Breaking change detected | `BreakingChangeReviewRequired` label | @raych1 / @markcowl / @catalinaperalta | Approve, suppress, or redesign | Manual |
+| Suppression violation | CI warning/error (suppression review tool) | Author | Fix or request suppression approval | Manual |
+| Breaking change detected | `BreakingChangeReviewRequired` label | @markcowl | Approve, suppress, or redesign | Manual |
+| SDK breaking change detected | `BreakingChange-{Language}-Sdk` label | @chunyu3 / @raych1 | Address breaking change or add suppression | Manual |
 | SDK dry-run failure | CI failure in spec-gen-sdk | Author / EngSys | Fix TypeSpec or escalate | Manual |
-| SDK breaking change detected | `BreakingChange-{Language}-Sdk` label | Author | Address breaking change or add suppression | Manual |
 | Namespace needs approval | `namespace-<lang>-pending` label | Namespace approvers | Apply `namespace-<lang>-approved` | Manual (label) |
 
 <details>
@@ -271,10 +268,10 @@ Build author-validation loop where agent auto-applies suppression decorators bas
 | Tool | Role | Owner |
 |------|------|-------|
 | Spec PR validation pipeline | Orchestrates full validation suite | EngSys |
-| TypeSpec compiler | CI compilation | TypeSpec team |
-| TypeSpec Lintdiff | TypeSpec-native linting on PR diffs. Replacing Swagger-based Spectral LintDiff. Includes suppression process (@catalinaperalta). | EngSys / TypeSpec team |
+| TypeSpec compiler | CI compilation + linting (lint rules run during compile) | TypeSpec team |
+| TypeSpec Suppression Review | Review TypeSpec lint rules that are suppressed. Replacing Swagger-based Spectral LintDiff. Also reviews `suppressions.yaml` changes (manual review, CI reports additions). New label TBD. | @catalinaperalta (tool), EngSys (integration) |
 | `@azure-tools/typespec-breaking-change` | Phase A + B detection at **TypeSpec/spec level**. Auto-adds `BreakingChangeReviewRequired` / `VersioningReviewRequired` labels. Detects breaking changes in the API spec itself. | @markcowl |
-| SDK breaking change detector ([PR #15588](https://github.com/Azure/azure-sdk-tools/pull/15588)) | Detects breaking changes in the **generated SDK API surface** (complements spec-level detection). Reports changes that may not be visible at spec level but affect SDK consumers. Being integrated into spec CI validation. | @raych1 / @catalinaperalta |
+| SDK breaking change detector | Detects breaking changes in the **generated SDK API surface** (complements spec-level detection). Some changes break SDKs but not APIs (e.g., added optional params, parameter order, type renames) and vice versa. Both detectors are needed for complete coverage. | @chunyu3 / @raych1 |
 | APIView emitter (`typespec-apiview`) | Generates API surface tokens for SDK-level architect review (tokens used at Stage 4). **Will be retired with ARH.** | APIView team |
 | spec-gen-sdk | SDK generation validation (dry-run) | EngSys (@raych1) |
 | Avocado / OAV | Legacy Swagger validation — **being deprecated** as TypeSpec-native tooling replaces them. | EngSys |
@@ -290,7 +287,6 @@ Build author-validation loop where agent auto-applies suppression decorators bas
 
 - [ ] How should `BreakingChangeReviewRequired` label route to the correct review team? CODEOWNERS, custom Action, or DevOps?
 - [ ] Should spec-gen-sdk failures be PR comments, structured JSON, or both?
-- [ ] How do SDK breaking change detector findings (PR #15588) differ from `@azure-tools/typespec-breaking-change` findings? What labels does the SDK detector add, and how are its errors reported?
 
 </details>
 
@@ -330,7 +326,7 @@ Build author-validation loop where agent auto-applies suppression decorators bas
 
 | Tool | Role | Owner |
 |------|------|-------|
-| tsp-client | Syncs TypeSpec project into SDK repo | EngSys |
+| tsp-client | Syncs TypeSpec project into SDK repo | @catalinaperalta (tool), EngSys (language repo integration) |
 | Language emitters | Generate client library code (one per language) | Language teams |
 | spec-gen-sdk | Pipeline automation — runs full workflow, creates SDK PRs | EngSys (@prkannap) |
 | azsdk-cli (`azsdk_package_generate_code`) | Local orchestration (available for dev iteration) | azsdk-cli team |
@@ -381,7 +377,7 @@ Structured error reporting from generation pipeline + agent-assisted troubleshoo
 | Other CI failure | Build/test/lint red | Language owner | Pipeline troubleshooting agent diagnoses | Manual (agent-assisted) |
 | API review feedback | Architect comments | Author | Resolve via TypeSpec changes → re-generate → new commit → CI re-runs | Manual |
 | API review not approved | Architect rejects API surface | Author | Revise TypeSpec design, update spec PR, re-generate SDK. May require follow-up architect discussion. Not all languages auto-approve — rejection path varies per language. | Manual |
-| SDK breaking change | Detection report | @raych1 / @catalinaperalta | Review and approve or fix | Manual |
+| SDK breaking change | `BreakingChange-{Language}-Sdk` label on spec PR | @chunyu3 / @raych1 | Address breaking change or add suppression | Manual |
 
 <details>
 <summary>Deep spec: tools, contracts, and unresolved questions</summary>
@@ -391,7 +387,7 @@ Structured error reporting from generation pipeline + agent-assisted troubleshoo
 | Tool | Role | Owner |
 |------|------|-------|
 | Language CI pipelines | Build, test, lint, package validation | Language teams |
-| SDK breaking change detector | Detects breaking changes in generated SDK API surface. Being combined into validation check. | @raych1 |
+| SDK breaking change detector | Detects breaking changes in generated SDK API surface. Being combined into validation check. | @chunyu3 / @raych1 |
 | APIView (current) | SDK public API surface review via web UI | APIView team |
 | **API Review Hub** (replacing APIView) | Creates synthetic review PRs with `API.md` diffs. PRs never merged — exist only for review. Architects auto-assigned. Approval recorded in ARH database (API hash). CI gates release by checking hash. | @tjprescott |
 | API review feedback resolution agent | Helps resolve API review comments via TypeSpec changes | azsdk-cli team |
@@ -527,6 +523,7 @@ Manual approval gate on release pipeline cannot be removed for security (ARM app
 | `BreakingChange-{Language}-Sdk-Approved` | Review team | Sdk breaking change approved | Yes | ⚠️ Manual label, validation automated |
 | `BreakingChange-{Language}-Sdk-Suppression` | Authors | SDK breaking change suppression updates | Yes | ✅ Fully automated |
 | `BreakingChange-{Language}-Sdk-Suppression-Approved` | Review team | SDK breaking change suppression approved | Yes | ⚠️ Manual label, validation automated |
+| `PublishToCustomers` | Author | Acknowledges APIs are shipped to customers. Required for PRs targeting `main` or `RPSaaSMaster`. Without it, PR cannot merge. **Low-hanging fruit for removal** -- redundant once all other gates pass; causes confusion for service teams. Could be auto-applied or removed entirely. | Yes | ⚠️ Manual label, enforced by CI |
 
 
 #### SDK PR Labels (language repos)
@@ -608,9 +605,9 @@ The system uses **prompt chaining**: independent sub-skills invoked sequentially
 | 3 | SDK PR not fully release-ready after generation: linter failures, test failures, merge conflicts, missing changelog/metadata. Tracked in [#15705](https://github.com/Azure/azure-sdk-tools/issues/15705). | 4 | @raych1 / Language teams | Yes | Open |
 | 4 | Release trigger not automated — auto-trigger on SDK PR merge being built | 5 | @raych1 | Yes | In progress |
 | 5 | ARH review PR creation not automated on SDK PRs | 4 | @tjprescott | Yes | Open |
-| 6 | Breaking change findings require manual resolution | 1, 2 | @markcowl / @catalinaperalta | No | Open |
-| 7 | `BreakingChangeReviewRequired` label routing to correct review team undefined | 2 | @raych1 / @markcowl / @catalinaperalta | No | Open |
-| 8 | SDK breaking change detection integration in progress | 4 | @raych1 / @catalinaperalta | No | In progress |
+| 6 | Breaking change findings require manual resolution | 1, 2 | @markcowl / @chunyu3 | No | Open |
+| 7 | `BreakingChangeReviewRequired` label routing to correct review team undefined | 2 | @raych1 / @markcowl | No | Open |
+| 8 | SDK breaking change detection integration in progress | 4 | @chunyu3 / @raych1 | No | In progress |
 | 9 | REST API spec review gates not documented in detail (different review teams, labels, and blocking behavior) | 2, 4 | @samvaity / @prkannap | No | Open |
 | 10 | Release pipeline provisioning delay for new RPs | 5 | EngSys | No | In progress |
 | 11 | API review feedback agent needs ARH compatibility | 4 | azsdk-cli team | No | Open |
@@ -659,6 +656,12 @@ The system uses **prompt chaining**: independent sub-skills invoked sequentially
 
 **Description**: Breaking changes require review team approval. Separate process with own team and labels.
 
+**ARM breaking changes**: `BreakingChangeReviewRequired` label applied by CI on spec PRs. Routed to ARM breaking change review team. Must receive `Approved-BreakingChange` label before merge.
+
+**SDK breaking changes** (all specs): `BreakingChange-{Language}-Sdk` label applied by CI. Review team is @chunyu3/@raych1. Must receive `BreakingChange-{Language}-Sdk-Approved` before merge.
+
+**Data-plane spec-level breaking changes**: The `BreakingChangeReviewRequired` label is applied on data-plane spec PRs too, but the review team and routing are not defined. Open question: Who reviews data-plane spec-level breaking changes? This is tracked as part of [Gap #9](#gap-tracker) (REST API spec review gates).
+
 **Impact**: Breaking change releases blocked until approved.
 
 **Workaround**: Agent helps prepare suppression decorators with clear reasons.
@@ -696,7 +699,7 @@ The system uses **prompt chaining**: independent sub-skills invoked sequentially
 - **Suppression Decorators**: `@approvedBreakingChange` (Phase B) and `@approvedUnversionedChange` (Phase A).
 - **TypeSpec Customizations**: SDK-specific customizations in `client.tsp`.
 - **Code Customizations**: Hand-written SDK code preserved across regeneration.
-- **TypeSpec Lintdiff**: Linting pipeline on spec PR diffs. Replacing Swagger-based Spectral LintDiff.
+- **TypeSpec Suppression Review**: Reviews suppressed TypeSpec lint rules. Replacing Swagger-based Spectral LintDiff. Owned by @catalinaperalta (tool), EngSys (integration).
 - **spec-gen-sdk**: Pipeline tool automating SDK generation from specs.
 
 </details>
@@ -730,7 +733,7 @@ flowchart TD
     step3 --> S2
 
     subgraph S2["STAGE 2: Spec PR Validation (CI)"]
-        step4["Step 4: CI Validation Pipeline<br/>• TypeSpec compilation<br/>• LintDiff<br/>• Breaking change detection<br/>• APIView token generation<br/>• SDK generation dry-run<br/>• Labels applied"]
+        step4["Step 4: CI Validation Pipeline<br/>• TypeSpec compilation (includes linting)<br/>• Suppression review<br/>• Breaking change detection<br/>• APIView token generation<br/>• SDK generation dry-run<br/>• Labels applied"]
         step4 -->|FAIL| fixPR["Fix issues → push to PR<br/>(re-triggers pipeline)"]
         step4 -->|PASS| reviews["Step 4b: Reviews<br/>• ARM review<br/>• Namespace approval"]
     end
