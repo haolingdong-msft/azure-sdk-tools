@@ -1,4 +1,4 @@
-# Azure.Sdk.Tools.Vally
+# azsdk-evals
 
 MCP-tool / end-to-end scenario evaluations for the `azsdk` MCP server, run via
 [`@microsoft/vally-cli`](https://www.npmjs.com/package/@microsoft/vally-cli).
@@ -13,11 +13,11 @@ different folders. A full end-to-end gate runs *both*.
 |---|---|---|
 | **Question** | Given a user prompt, does the agent invoke the right MCP tool(s) with the right shape? | Given a user prompt, does the agent route to the right skill and follow its instructions? |
 | **Catches** | Tool name / description / parameter regressions; multi-tool ordering; tool-catalog conflicts | Skill frontmatter / `description` / instruction regressions; skill-routing collisions |
-| **Path** | [`tools/azsdk-cli/Azure.Sdk.Tools.Vally/evals/`](evals/) (`tools/` + `workflow-scenarios/`) | [`.github/skills/<skill-name>/evals/*.eval.yaml`](../../../.github/skills/) (and `evaluate/evals/` for capability suites) |
+| **Path** | [`azsdk-evals/evals/`](evals/) (`tools/` + `workflow-scenarios/`) | [`.github/skills/<skill-name>/evals/*.eval.yaml`](../.github/skills/) (and `evaluate/evals/` for capability suites) |
 | **Loaded subject** | Production MCP server (`Azure.Sdk.Tools.Cli`) over stdio — real tools, real network calls | Skill's `SKILL.md` + frontmatter; the agent picks tools itself |
 | **Primary grader** | `tool-calls` — checks the recorded trajectory for required tool names | Trigger / routing graders + per-skill rubric |
 | **Run command** | `vally eval --eval-spec evals/tools/<name>.eval.yaml` *from this directory* | `vally eval --skill-dir .github/skills/<skill-name>` *from repo root* |
-| **CI status** | Phase 1 mock vertical in [`eng/pipelines/vally-eval.yml`](../../../eng/pipelines/vally-eval.yml) (hermetic `unit` + mock tiers, detect→shard→summarize); live tier deferred | `vally lint` runs in [.github/workflows/skill-eval.yml](../../../.github/workflows/skill-eval.yml); full `eval` job pending |
+| **CI status** | Phase 1 mock vertical in [`eng/pipelines/vally-eval.yml`](../eng/pipelines/vally-eval.yml) (hermetic `unit` + mock tiers, detect→shard→summarize); live tier deferred | `vally lint` runs in [.github/workflows/skill-eval.yml](../.github/workflows/skill-eval.yml); full `eval` job pending |
 | **Cost profile** | Higher — each run spins up the MCP server, real LLM turns (~5–15), real tool calls | Variable — trigger evals are cheap; capability evals (e.g. `azure-typespec-author`) are expensive |
 
 ### Why both?
@@ -74,21 +74,21 @@ pipelines, runs nightly).
 | [`release-planner`](evals/workflow-scenarios/live/release-planner.eval.yaml) | release-plan | **live** | Create + re-fetch a release plan, kick off SDK gen, link PR back — real DevOps test-area writes |
 
 Live scenarios need a primed `azure-rest-api-specs` clone — run
-[`sync-eval-git-repo.js`](../../../eng/common/scripts/eval/sync-eval-git-repo.js)
-(`node ../../../eng/common/scripts/eval/sync-eval-git-repo.js`; local-only
+[`sync-eval-git-repo.js`](../eng/common/scripts/eval/sync-eval-git-repo.js)
+(`node ../eng/common/scripts/eval/sync-eval-git-repo.js`; local-only
 helper, auto-refreshes every 24h) before invoking the
 `scenarios-live` / `nightly` suite.
 
 **Skill evals (already in repo, *not* part of this PR)** — for reference:
 
 - **Trigger evals** (one per skill, verify routing): see e.g.
-  [`.github/skills/azsdk-common-prepare-release-plan/evals/trigger.eval.yaml`](../../../.github/skills/azsdk-common-prepare-release-plan/evals/trigger.eval.yaml),
+  [`.github/skills/azsdk-common-prepare-release-plan/evals/trigger.eval.yaml`](../.github/skills/azsdk-common-prepare-release-plan/evals/trigger.eval.yaml),
   plus `azsdk-common-sdk-release`, `azsdk-common-pipeline-troubleshooting`,
   `azsdk-common-apiview-feedback-resolution`, `sensei`,
   `skill-authoring`, `markdown-token-optimizer`.
-- **Capability suite** for [`azure-typespec-author`](../../../.github/skills/azure-typespec-author/) —
+- **Capability suite** for [`azure-typespec-author`](../.github/skills/azure-typespec-author/) —
   29 numbered cases under
-  [`.github/skills/azure-typespec-author/evaluate/evals/`](../../../.github/skills/azure-typespec-author/evaluate/evals/)
+  [`.github/skills/azure-typespec-author/evaluate/evals/`](../.github/skills/azure-typespec-author/evaluate/evals/)
   (`001001.eval.yaml` … `005001.eval.yaml`). These are the data-driven
   TypeSpec authoring scenarios that *would* have been our follow-up #1
   here — they're already covered as skill evals, so this project doesn't
@@ -102,7 +102,7 @@ tracks the migration in
 ## Layout
 
 ```
-Azure.Sdk.Tools.Vally/
+azsdk-evals/
 ├── .vally.yaml                # Vally config (environments + suites)
 ├── evals/
 │   ├── tools/                  # tool-shape + per-skill trigger evals, hermetic
@@ -113,7 +113,7 @@ Azure.Sdk.Tools.Vally/
 ├── fixtures/                  # Per-scenario static input files (env.files)
 │   └── <scenario-name>/...
 └── Graders/                   # (future) Custom .NET graders
-    └── Azure.Sdk.Tools.Vally.csproj  # added when first custom grader lands
+    └── AzsdkEvals.Graders.csproj  # added when first custom grader lands
 ```
 
 Folder = tier (cost / CI cadence): `unit/` is hermetic + fast,
@@ -148,9 +148,9 @@ framework moniker (avoids `Debug/net8.0/...` drift).
 All commands below run from here:
 
 ```powershell
-cd tools/azsdk-cli/Azure.Sdk.Tools.Vally
-$vally  = '../../../eng/skill-eval/node_modules/.bin/vally.cmd'
-$skills = '../../../.github/skills'
+cd azsdk-evals
+$vally  = '../eng/skill-eval/node_modules/.bin/vally.cmd'
+$skills = '../.github/skills'
 ```
 
 ### 3. Run a scenario
@@ -171,7 +171,7 @@ $skills = '../../../.github/skills'
 test area; prime the spec clone once):
 
 ```powershell
-node ../../../eng/common/scripts/eval/sync-eval-git-repo.js
+node ../eng/common/scripts/eval/sync-eval-git-repo.js
 & $vally eval -e evals/workflow-scenarios/live/release-planner.eval.yaml --skill-dir $skills --workers 1
 ```
 
@@ -210,9 +210,9 @@ plus Node 22+ and a .NET SDK matching `global.json`.
 Run a suite (recommended):
 
 ```powershell
-cd tools/azsdk-cli/Azure.Sdk.Tools.Vally
-$vally = '../../../eng/skill-eval/node_modules/.bin/vally.cmd'
-$skills = '../../../.github/skills'
+cd azsdk-evals
+$vally = '../eng/skill-eval/node_modules/.bin/vally.cmd'
+$skills = '../.github/skills'
 
 # Fast tiers only — PR-gate candidate
 & $vally eval --suite pr-gate --skill-dir $skills
@@ -247,7 +247,7 @@ Run the live scenarios tier (first, prime a per-user clone of
 `azure-rest-api-specs`; the helper refreshes it every 24h):
 
 ```powershell
-node ../../../eng/common/scripts/eval/sync-eval-git-repo.js
+node ../eng/common/scripts/eval/sync-eval-git-repo.js
 & $vally eval --suite scenarios-live --skill-dir $skills --workers 1
 ```
 
@@ -256,8 +256,8 @@ node ../../../eng/common/scripts/eval/sync-eval-git-repo.js
 All recipes assume the two path variables are set first:
 
 ```powershell
-$vally  = (Resolve-Path '../../../eng/skill-eval/node_modules/.bin/vally.cmd').Path
-$skills = '../../../.github/skills'
+$vally  = (Resolve-Path '../eng/skill-eval/node_modules/.bin/vally.cmd').Path
+$skills = '../.github/skills'
 ```
 
 Run several eval files at once (repeat `-e`):
@@ -389,13 +389,13 @@ those constraints are captured in prompt text and inline `TODO:` comments.
       `optional`, argument-matching, and ordering to the built-in `tool-calls`
       grader (or accept that those gaps need custom graders).
 - [ ] Wire a `vally eval` CI job for this project (current
-      [`.github/workflows/skill-eval.yml`](../../../.github/workflows/skill-eval.yml)
+      [`.github/workflows/skill-eval.yml`](../.github/workflows/skill-eval.yml)
       runs `vally lint` only and is scoped to skills). See
       [#15126](https://github.com/Azure/azure-sdk-tools/issues/15126) and
       [#15127](https://github.com/Azure/azure-sdk-tools/issues/15127).
 - [ ] Decide on `AuthoringScenario` parity: the 29 TypeSpec authoring cases
       are already covered as **skill evals** under
-      [`.github/skills/azure-typespec-author/evaluate/evals/`](../../../.github/skills/azure-typespec-author/evaluate/evals/).
+      [`.github/skills/azure-typespec-author/evaluate/evals/`](../.github/skills/azure-typespec-author/evaluate/evals/).
       Tracked as [#15767](https://github.com/Azure/azure-sdk-tools/issues/15767) —
       likely close as duplicate unless we also want tool-level coverage of the
       same prompts (catches catalog regressions even when the skill isn't
