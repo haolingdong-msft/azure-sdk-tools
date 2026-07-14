@@ -450,10 +450,12 @@ function Remove-DependencyResources() {
       $null -eq (Get-AzResource -ResourceId $resource.ResourceId -ErrorAction SilentlyContinue)
     }.GetNewClosure()
 
-    $job = Remove-AzResource -ResourceId $resource.ResourceId -Force -AsJob
-    $deleteError = Wait-DeleteJob -Job $job -DisplayName "$Description '$($resource.Name)'" -VerifyDeleted $verifyDeleted
-    if ($deleteError) {
-      $errors += $deleteError
+    try {
+      $job = Remove-AzResource -ResourceId $resource.ResourceId -Force -AsJob -ErrorAction Stop
+      $deleteError = Wait-DeleteJob -Job $job -DisplayName "$Description '$($resource.Name)'" -VerifyDeleted $verifyDeleted
+      if ($deleteError) { $errors += $deleteError }
+    } catch {
+      $errors += "Failed deleting $Description '$($resource.Name)' ($($resource.ResourceId)): $($_.Exception.Message)"
     }
   }
 
