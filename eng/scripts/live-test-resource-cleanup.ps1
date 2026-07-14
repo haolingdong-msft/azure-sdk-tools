@@ -288,7 +288,8 @@ function FindOrCreateDeleteAfterTag {
     if ($Force -or $PSCmdlet.ShouldProcess("$($ResourceGroup.ResourceGroupName) [DeleteAfter (UTC): $deleteAfter]", "Adding DeleteAfter Tag to Group")) {
       # A ReadOnly lock (at the group, subscription, or management group scope) blocks tag writes on the group.
       # Skip the update in that case to avoid a terminating error under $ErrorActionPreference = 'Stop'.
-      if (HasDeleteLock $ResourceGroup) {
+      $readOnlyLocks = @(Get-AzResourceLock -ResourceGroupName $ResourceGroup.ResourceGroupName -ErrorAction SilentlyContinue | Where-Object { $_.Properties.Level -eq 'ReadOnly' })
+      if ($readOnlyLocks) {
         return
       }
       Write-Host "Adding DeleteAfter tag with value '$deleteAfter' to group '$($ResourceGroup.ResourceGroupName)'"
