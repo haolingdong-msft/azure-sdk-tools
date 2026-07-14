@@ -14,7 +14,7 @@ import uuid
 
 from .crosslinks import add_cross_links
 from .embeddings import EmbeddingIndex
-from .llm import build_embedder, build_synthesizer
+from .llm import ExtractiveSynthesizer, build_embedder, build_synthesizer
 from .models import WikiTree
 from .synthesis import synthesize_tree
 from .toc import build_toc_tree
@@ -36,15 +36,42 @@ def build_wiki_tree(
     top_k_links: int = 3,
     min_link_sim: float = 0.55,
 ) -> tuple[WikiTree, EmbeddingIndex]:
-    """Build the wiki tree and node embeddings from a corpus."""
-    synthesizer = build_synthesizer(synth_mode)
+    """Build the wiki tree and node embeddings from a corpus.
+
+    ``synth_mode``:
+      * ``extractive`` — extractive summaries + extractive overview pages.
+      * ``llm`` — extractive summaries (stable embedding entry) + **LLM-distilled
+        document overview pages** (the WeKnora synthesis lever, surfaced as
+        ``(overview)`` references). Clean A/B vs ``extractive``.
+      * ``llm-full`` — LLM for both summaries and pages.
+      * ``auto`` — LLM when Azure OpenAI is configured, else extractive.
+    """
     embedder = build_embedder(embed_mode)
+
+    # Choose the summarizer (embedding-entry text) and page writer (overview
+    # pages) independently so cost lands where it matters.
+    if synth_mode == "extractive":
+        summarizer = ExtractiveSynthesizer()
+        page_writer = ExtractiveSynthesizer()
+        doc_pages_only = True
+    elif synth_mode == "llm":
+        summarizer = ExtractiveSynthesizer()
+        page_writer = build_synthesizer("llm")
+        doc_pages_only = True
+    elif synth_mode == "llm-full":
+        summarizer = build_synthesizer("llm")
+        page_writer = summarizer
+        doc_pages_only = False
+    else:  # auto
+        summarizer = build_synthesizer("auto")
+        page_writer = summarizer
+        doc_pages_only = False
 
     logger.info("Building ToC skeleton from %d documents…", len(corpus))
     tree = build_toc_tree(corpus)
 
-    logger.info("Synthesising summaries and roll-up pages…")
-    synthesize_tree(tree, synthesizer)
+    logger.info("Synthesising summaries and roll-up pages (mode=%s)…", synth_mode)
+    synthesize_tree(tree, summarizer, page_writer, doc_pages_only=doc_pages_only)
 
     logger.info("Discovering cross-links and node embeddings…")
     index = add_cross_links(tree, embedder, top_k=top_k_links, min_sim=min_link_sim)
