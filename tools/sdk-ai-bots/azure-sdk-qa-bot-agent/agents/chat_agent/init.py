@@ -32,6 +32,7 @@ from agent_framework_foundry_hosting import ResponsesHostServer
 import config.app_config as app_config
 from config.app_config import get as cfg
 from tools.knowledge_tools import KnowledgeTools
+from tools.wiki_knowledge_tools import WikiKnowledgeTools
 from tools.web_tools import WebTools
 from tools.ado_mcp_tools import create_ado_mcp_tool
 from tools.github_mcp_tools import create_github_mcp_tool
@@ -90,6 +91,7 @@ async def main() -> None:
 
     # Init Tools (synchronous / instant)
     knowledge_tools = KnowledgeTools()
+    wiki_knowledge_tools = WikiKnowledgeTools()
     web_tools = WebTools()
     pipeline_tools = PipelineTools()
     web_search_tool = agent_client.get_web_search_tool(
@@ -98,6 +100,7 @@ async def main() -> None:
 
     tools = [
         knowledge_tools.search_knowledge_base,
+        wiki_knowledge_tools.search_wiki,
         web_tools.web_fetch,
         pipeline_tools.azsdk_analyze_pipeline,
         web_search_tool,

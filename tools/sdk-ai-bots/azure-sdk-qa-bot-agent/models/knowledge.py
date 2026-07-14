@@ -127,6 +127,42 @@ class SearchKnowledgeBaseResult(BaseModel):
     results: list[Reference] = []
 
 
+class WikiSearchResult(BaseModel):
+    """Output of the ``search_wiki`` tool / ``POST /wiki/query`` endpoint.
+
+    Mirrors ``SearchKnowledgeBaseResult`` / ``GraphSearchResult``: a flat list
+    of :class:`Reference` objects plus the echoed query, so wiki-tree hits fuse
+    uniformly with KB hits. ``content`` carries either a source section excerpt
+    (``kind='section'``) or a rolled-up overview page (``kind='synthesis'``);
+    ``source`` is the originating ``KnowledgeSource.name``.
+    """
+
+    references: list[Reference] = []
+    query: str = ""
+
+
+class WikiQueryRequest(BaseModel):
+    """Request body for the ``POST /wiki/query`` endpoint.
+
+    The chat agent posts here to delegate wiki-tree retrieval to the
+    long-running backend server, which keeps a warm ``WikiTreeService``
+    singleton (the snapshot + node embeddings load once per pod). When
+    ``tenant_id`` resolves to a known ``TenantConfig``, retrieval is
+    restricted to that tenant's ``KnowledgeSource`` folders — same scoping
+    as ``search_knowledge_base``. Unknown / empty ``tenant_id`` falls back
+    to unscoped retrieval.
+    """
+
+    query: str = Field(..., description="Natural-language query to retrieve wiki-tree references for.")
+    tenant_id: str | None = Field(
+        default=None,
+        description=(
+            "Optional tenant identifier; when set to a known TenantID, "
+            "retrieval is restricted to that tenant's knowledge source folders."
+        ),
+    )
+
+
 class DocumentContext(BaseModel):
     """A knowledge document in the eval-pipeline format (document_* keys)."""
 

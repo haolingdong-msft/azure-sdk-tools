@@ -6,7 +6,9 @@ and handles feedback through a local workflow.
 """
 
 import asyncio
+import contextlib
 import logging
+import os
 import sys
 import time
 from contextvars import ContextVar
@@ -21,6 +23,7 @@ from models.chat import ChatRequest, ChatResponse
 from models.conversation import ConversationMessage, SaveConversationMessageResponse
 from models.feedback import FeedbackRequest, FeedbackResponse
 from models.intention import IntentionRequest, IntentionResponse
+from models.knowledge import Reference, WikiQueryRequest, WikiSearchResult
 from models.knowledge_retrieve import KnowledgeRetrieveResponse, KnowledgeRetrieveRequest
 from services.chat_service import ChatService
 from services.conversation_service import ConversationService
@@ -100,14 +103,67 @@ async def lifespan(application: FastAPI):
     """Startup / shutdown lifecycle for the FastAPI app."""
     logger.info("Backend server starting up")
     await app_config.init()
-    yield
-    # Cleanup SDK clients on shutdown
-    logger.info("Backend server shutting down")
-    await BackgroundTaskTracker.instance().shutdown()
-    await close_clients()
-    await close_cosmos_client()
-    await close_storage_client()
-    await close_credential()
+
+    # Pre-warm the wiki-tree retrieval snapshot (tree.json + embeddings) off
+    # the request path so the first /wiki/query doesn't pay the cold-load tax.
+    # Tolerates failure — queries fall back to a lazy load.
+    async def _warm_wiki():
+        try:
+            from utils.knowledge_wiki import get_wiki_service
+
+            service = get_wiki_service()
+            if not service.enabled:
+                logger.info("Wiki service disabled (STORAGE_WIKI_OUTPUT_CONTAINER unset)")
+                return
+            logger.info("Pre-warming wiki-tree snapshot at startup")
+            status = await service.reload()
+            if not status.get("loaded"):
+                logger.error("Wiki pre-warm did not load a snapshot: %s", status)
+            else:
+                logger.info("Wiki pre-warm complete: %s", status)
+        except Exception:
+            logger.error("Wiki pre-warm failed; first query will lazy load", exc_info=True)
+
+    warm_task = asyncio.create_task(_warm_wiki())
+
+    # Periodic poll: hot-swap when latest.json build_id changes.
+    async def _poll_wiki_manifest():
+        try:
+            interval = float(os.environ.get("WIKI_RELOAD_POLL_SECONDS", "86400"))
+        except (TypeError, ValueError):
+            interval = 86400.0
+        if interval <= 0:
+            return
+        from utils.knowledge_wiki import get_wiki_service
+
+        service = get_wiki_service()
+        if not service.enabled:
+            return
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                await service.reload_if_changed()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Wiki scheduled manifest poll failed")
+
+    poll_task = asyncio.create_task(_poll_wiki_manifest())
+
+    try:
+        yield
+    finally:
+        for task in (warm_task, poll_task):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        # Cleanup SDK clients on shutdown
+        logger.info("Backend server shutting down")
+        await BackgroundTaskTracker.instance().shutdown()
+        await close_clients()
+        await close_cosmos_client()
+        await close_storage_client()
+        await close_credential()
 
 
 app = FastAPI(title="Azure SDK QA Bot Backend", version=VERSION, lifespan=lifespan)
@@ -258,6 +314,85 @@ async def _update_thread_memory(message: ConversationMessage) -> None:
             message.id,
             exc_info=True,
         )
+
+
+# --------------------------------------------------------------------------- #
+# Wiki-tree query endpoint (called by chat_agent's search_wiki tool)
+# --------------------------------------------------------------------------- #
+# The chat agent runs in a fresh Foundry sandbox per session; loading the
+# wiki snapshot + node embeddings there each time would be wasteful. Instead
+# the agent POSTs here and the backend's lifespan pre-warms a single
+# WikiTreeService for the pod, so each call resolves in ~1s (one AOAI
+# embedding + one matmul + tree/link expansion). Authentication is delegated
+# to App Service EasyAuth at the ingress (same as other backend endpoints).
+
+
+@app.post("/wiki/query", response_model=WikiSearchResult)
+async def wiki_query(req: WikiQueryRequest) -> WikiSearchResult:
+    """Run wiki-tree retrieval and return KB-style references.
+
+    Scopes to the tenant's ``KnowledgeSource`` folders (and per-source title
+    filters) exactly like ``search_knowledge_base``. Never raises 5xx for
+    query-side failures so the chat agent can degrade gracefully.
+    """
+    from config.tenant_config import TenantID, get_tenant_config
+    from utils.knowledge_wiki import get_wiki_service
+
+    normalised_query = (req.query or "").strip()
+    if not normalised_query:
+        return WikiSearchResult(references=[], query="")
+
+    service = get_wiki_service()
+    if not service.enabled:
+        return WikiSearchResult(references=[], query=normalised_query)
+
+    # Resolve tenant → allowed source folders + per-source title terms.
+    allowed_source_folders: set[str] | None = None
+    source_path_filters: dict[str, list[str]] | None = None
+    tenant_id_raw = (req.tenant_id or "").strip()
+    if tenant_id_raw:
+        try:
+            tenant_enum = TenantID(tenant_id_raw)
+        except ValueError:
+            logger.warning("Wiki query: unknown tenant_id %r — unscoped", tenant_id_raw)
+            tenant_enum = None
+        if tenant_enum is not None:
+            tenant_config = get_tenant_config(tenant_enum)
+            if tenant_config and tenant_config.sources:
+                allowed_source_folders = {
+                    src.name for src in tenant_config.sources if src.name
+                }
+                source_path_filters = {
+                    name: _split_title_terms(odata)
+                    for name, odata in tenant_config.source_filter.items()
+                    if _split_title_terms(odata)
+                } or None
+
+    try:
+        refs = await service.search(
+            normalised_query,
+            allowed_source_folders=allowed_source_folders,
+            source_path_filters=source_path_filters,
+        )
+    except Exception:
+        logger.exception("Wiki query failed for %r", normalised_query)
+        return WikiSearchResult(references=[], query=normalised_query)
+
+    return WikiSearchResult(references=refs, query=normalised_query)
+
+
+def _split_title_terms(odata: str) -> list[str]:
+    """Best-effort extraction of match terms from a KB ``source_filter`` clause.
+
+    Tenant ``source_filter`` values are OData ``search.ismatch(...,'title')``
+    clauses; we only need the quoted match terms to narrow wiki refs by their
+    ``rel_title``. Returns the single-quoted tokens found in *odata*.
+    """
+    import re
+
+    if not odata:
+        return []
+    return [m for m in re.findall(r"'([^']+)'", odata) if m and m != "title"]
 
 
 if __name__ == "__main__":
