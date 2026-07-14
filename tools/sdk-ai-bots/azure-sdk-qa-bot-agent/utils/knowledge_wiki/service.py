@@ -169,6 +169,73 @@ class WikiTreeService:
         wrefs = _apply_source_path_filters(wrefs, source_path_filters)
         return [_to_reference(w) for w in wrefs]
 
+    # ------------------------------------------------------------------ #
+    # Navigation API (PageIndex-style map / open)
+    # ------------------------------------------------------------------ #
+    async def map_query(
+        self,
+        query: str,
+        *,
+        allowed_source_folders: set[str] | None = None,
+        source_path_filters: dict[str, list[str]] | None = None,
+        entry_k: int = 12,
+    ) -> list[dict]:
+        """Return a ranked map of relevant nodes (no body text)."""
+        if self._retriever is None:
+            status = await self.reload()
+            if not status.get("loaded"):
+                return []
+        qvec = await self._embed_query(query)
+        return self._retriever.map(
+            query,
+            embed_query=lambda _q: qvec,
+            allowed_sources=allowed_source_folders,
+            source_path_filters=source_path_filters,
+            entry_k=entry_k,
+        )
+
+    async def open_nodes(
+        self,
+        node_ids: list[str],
+        *,
+        allowed_source_folders: set[str] | None = None,
+        source_path_filters: dict[str, list[str]] | None = None,
+    ) -> list[dict]:
+        """Open nodes: return distilled page + evidence + children/related, links resolved."""
+        if self._retriever is None:
+            status = await self.reload()
+            if not status.get("loaded"):
+                return []
+        raw = self._retriever.open(
+            node_ids,
+            allowed_sources=allowed_source_folders,
+            source_path_filters=source_path_filters,
+        )
+        for node in raw:
+            node["link"] = _resolve_link(node.get("source", ""), node.get("rel_title", ""))
+            content = node.get("content") or ""
+            if len(content) > _SNIPPET_MAX_CHARS:
+                node["content"] = content[:_SNIPPET_MAX_CHARS] + "\n… [truncated]"
+            page = node.get("page") or ""
+            if len(page) > _SNIPPET_MAX_CHARS:
+                node["page"] = page[:_SNIPPET_MAX_CHARS] + "\n… [truncated]"
+        return raw
+
+
+def _resolve_link(source: str, rel_title: str) -> str:
+    """Resolve a source + rel_title into a KB-style document URL."""
+    if not rel_title:
+        return ""
+    try:
+        from config.tenant_config import get_knowledge_source
+
+        ks = get_knowledge_source(source)
+        if ks is not None:
+            return ks.get_link(rel_title)
+    except Exception:
+        logger.debug("link resolution failed for source=%s", source, exc_info=True)
+    return rel_title
+
 
 def _apply_source_path_filters(
     wrefs: list[WikiReference], filters: dict[str, list[str]] | None

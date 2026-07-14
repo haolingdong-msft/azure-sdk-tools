@@ -171,3 +171,131 @@ class WikiRetriever:
                 return cur
             cur = self._tree.nodes.get(cur.parent) if cur.parent else None
         return None
+
+    # ------------------------------------------------------------------ #
+    # Navigation API (PageIndex-style: map the tree, then open nodes)
+    # ------------------------------------------------------------------ #
+    def map(
+        self,
+        query: str,
+        embed_query: Callable[[str], list[float]],
+        *,
+        allowed_sources: set[str] | None = None,
+        source_path_filters: dict[str, list[str]] | None = None,
+        entry_k: int = 12,
+        min_sim: float = 0.15,
+    ) -> list[dict]:
+        """Return a ranked MAP of relevant nodes (title path + summary, no body).
+
+        This is the "where to look" step: the agent reads the map and decides
+        which node ids to :meth:`open`. Bodies are deliberately omitted to keep
+        the map compact and force a reasoning step over structure, not cosine.
+        """
+        query = (query or "").strip()
+        if not query or not self._index.ids:
+            return []
+        qv = np.asarray(embed_query(query), dtype=np.float32)
+        scores = self._index.cosine_all(qv)
+        if allowed_sources is not None:
+            mask = np.isin(self._row_source, list(allowed_sources))
+            scores = np.where(mask, scores, -1.0)
+
+        order = np.argsort(scores)[::-1]
+        best = float(scores[order[0]]) if len(order) else 1.0
+        best = best or 1.0
+        out: list[dict] = []
+        for pos in order[: entry_k * 3]:
+            s = float(scores[pos])
+            if s < min_sim:
+                break
+            nid = self._index.ids[pos]
+            node = self._tree.nodes.get(nid)
+            if node is None:
+                continue
+            if not _passes_title_filter(node, source_path_filters):
+                continue
+            doc = self._ancestor_doc(nid)
+            out.append(
+                {
+                    "id": nid,
+                    "title_path": node.title_path(),
+                    "summary": node.summary,
+                    "source": node.source,
+                    "kind": node.kind,
+                    "has_children": bool(node.children),
+                    "doc_id": doc.id if doc else "",
+                    "doc_title": doc.title if doc else "",
+                    "score": round(s / best, 4),
+                }
+            )
+            if len(out) >= entry_k:
+                break
+        return out
+
+    def open(
+        self,
+        node_ids: list[str],
+        *,
+        allowed_sources: set[str] | None = None,
+        source_path_filters: dict[str, list[str]] | None = None,
+        max_children: int = 15,
+        max_related: int = 8,
+    ) -> list[dict]:
+        """Return full node payloads: page + evidence + children/related handles.
+
+        This is the "read + decide where next" step. ``page`` is the distilled
+        overview (the authoritative answer surface); ``content`` is the raw
+        section evidence for citation; ``children``/``related`` are handles the
+        agent can open to drill down or follow cross-document links.
+        """
+        out: list[dict] = []
+        seen: set[str] = set()
+        for nid in node_ids:
+            if nid in seen:
+                continue
+            seen.add(nid)
+            node = self._tree.nodes.get(nid)
+            if node is None:
+                continue
+            if allowed_sources is not None and node.source and node.source not in allowed_sources:
+                continue
+            children = [
+                {"id": c.id, "title": c.title, "summary": c.summary, "source": c.source}
+                for c in self._tree.children_of(nid)[:max_children]
+            ]
+            related: list[dict] = []
+            for rid in node.related[:max_related]:
+                r = self._tree.nodes.get(rid)
+                if r is None:
+                    continue
+                if allowed_sources is not None and r.source and r.source not in allowed_sources:
+                    continue
+                if not _passes_title_filter(r, source_path_filters):
+                    continue
+                related.append(
+                    {"id": r.id, "title": r.title_path(), "summary": r.summary, "source": r.source}
+                )
+            out.append(
+                {
+                    "id": nid,
+                    "title_path": node.title_path(),
+                    "source": node.source,
+                    "rel_title": node.rel_title,
+                    "page": node.page,
+                    "content": node.section_text,
+                    "children": children,
+                    "related": related,
+                }
+            )
+        return out
+
+
+def _passes_title_filter(node, source_path_filters: dict[str, list[str]] | None) -> bool:
+    """True unless the node's source has title terms none of which match rel_title."""
+    if not source_path_filters:
+        return True
+    terms = source_path_filters.get(node.source)
+    if not terms:
+        return True
+    hay = (node.rel_title or "").lower()
+    return any(t.lower() in hay for t in terms)

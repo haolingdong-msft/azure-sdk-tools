@@ -23,7 +23,18 @@ from models.chat import ChatRequest, ChatResponse
 from models.conversation import ConversationMessage, SaveConversationMessageResponse
 from models.feedback import FeedbackRequest, FeedbackResponse
 from models.intention import IntentionRequest, IntentionResponse
-from models.knowledge import Reference, WikiQueryRequest, WikiSearchResult
+from models.knowledge import (
+    Reference,
+    WikiMapRequest,
+    WikiMapResult,
+    WikiMapEntry,
+    WikiOpenRequest,
+    WikiOpenResult,
+    WikiNodeView,
+    WikiChildView,
+    WikiQueryRequest,
+    WikiSearchResult,
+)
 from models.knowledge_retrieve import KnowledgeRetrieveResponse, KnowledgeRetrieveRequest
 from services.chat_service import ChatService
 from services.conversation_service import ConversationService
@@ -335,7 +346,6 @@ async def wiki_query(req: WikiQueryRequest) -> WikiSearchResult:
     filters) exactly like ``search_knowledge_base``. Never raises 5xx for
     query-side failures so the chat agent can degrade gracefully.
     """
-    from config.tenant_config import TenantID, get_tenant_config
     from utils.knowledge_wiki import get_wiki_service
 
     normalised_query = (req.query or "").strip()
@@ -346,27 +356,7 @@ async def wiki_query(req: WikiQueryRequest) -> WikiSearchResult:
     if not service.enabled:
         return WikiSearchResult(references=[], query=normalised_query)
 
-    # Resolve tenant → allowed source folders + per-source title terms.
-    allowed_source_folders: set[str] | None = None
-    source_path_filters: dict[str, list[str]] | None = None
-    tenant_id_raw = (req.tenant_id or "").strip()
-    if tenant_id_raw:
-        try:
-            tenant_enum = TenantID(tenant_id_raw)
-        except ValueError:
-            logger.warning("Wiki query: unknown tenant_id %r — unscoped", tenant_id_raw)
-            tenant_enum = None
-        if tenant_enum is not None:
-            tenant_config = get_tenant_config(tenant_enum)
-            if tenant_config and tenant_config.sources:
-                allowed_source_folders = {
-                    src.name for src in tenant_config.sources if src.name
-                }
-                source_path_filters = {
-                    name: _split_title_terms(odata)
-                    for name, odata in tenant_config.source_filter.items()
-                    if _split_title_terms(odata)
-                } or None
+    allowed_source_folders, source_path_filters = _resolve_wiki_scope(req.tenant_id)
 
     try:
         refs = await service.search(
@@ -393,6 +383,113 @@ def _split_title_terms(odata: str) -> list[str]:
     if not odata:
         return []
     return [m for m in re.findall(r"'([^']+)'", odata) if m and m != "title"]
+
+
+def _resolve_wiki_scope(
+    tenant_id_raw: str | None,
+) -> tuple[set[str] | None, dict[str, list[str]] | None]:
+    """Resolve a tenant id → (allowed source folders, per-source title terms).
+
+    Shared by every /wiki/* endpoint so navigation is scoped exactly like
+    ``search_knowledge_base``. Unknown / empty tenant → unscoped (None, None).
+    """
+    from config.tenant_config import TenantID, get_tenant_config
+
+    tenant_id_raw = (tenant_id_raw or "").strip()
+    if not tenant_id_raw:
+        return None, None
+    try:
+        tenant_enum = TenantID(tenant_id_raw)
+    except ValueError:
+        logger.warning("Wiki scope: unknown tenant_id %r — unscoped", tenant_id_raw)
+        return None, None
+    tenant_config = get_tenant_config(tenant_enum)
+    if not (tenant_config and tenant_config.sources):
+        return None, None
+    allowed = {src.name for src in tenant_config.sources if src.name}
+    filters = {
+        name: _split_title_terms(odata)
+        for name, odata in tenant_config.source_filter.items()
+        if _split_title_terms(odata)
+    } or None
+    return allowed, filters
+
+
+@app.post("/wiki/map", response_model=WikiMapResult)
+async def wiki_map(req: WikiMapRequest) -> WikiMapResult:
+    """Return a ranked MAP of relevant wiki-tree nodes (title path + summary).
+
+    The agent reads this map to reason about *where* the answer lives, then
+    calls ``/wiki/open`` on the node ids it chose. Fails soft (empty map).
+    """
+    from utils.knowledge_wiki import get_wiki_service
+
+    normalised_query = (req.query or "").strip()
+    if not normalised_query:
+        return WikiMapResult(entries=[], query="")
+
+    service = get_wiki_service()
+    if not service.enabled:
+        return WikiMapResult(entries=[], query=normalised_query)
+
+    allowed_source_folders, source_path_filters = _resolve_wiki_scope(req.tenant_id)
+    try:
+        raw = await service.map_query(
+            normalised_query,
+            allowed_source_folders=allowed_source_folders,
+            source_path_filters=source_path_filters,
+        )
+    except Exception:
+        logger.exception("Wiki map failed for %r", normalised_query)
+        return WikiMapResult(entries=[], query=normalised_query)
+
+    entries = [WikiMapEntry(**e) for e in raw]
+    return WikiMapResult(entries=entries, query=normalised_query)
+
+
+@app.post("/wiki/open", response_model=WikiOpenResult)
+async def wiki_open(req: WikiOpenRequest) -> WikiOpenResult:
+    """Open wiki-tree nodes: return the distilled page + evidence + navigation.
+
+    For each requested node id returns its rolled-up overview ``page``, raw
+    ``content`` evidence, resolved source ``link``, and ``children``/``related``
+    handles the agent can open next. Fails soft (empty list).
+    """
+    from utils.knowledge_wiki import get_wiki_service
+
+    node_ids = [n for n in (req.node_ids or []) if n and n.strip()][:8]
+    if not node_ids:
+        return WikiOpenResult(nodes=[])
+
+    service = get_wiki_service()
+    if not service.enabled:
+        return WikiOpenResult(nodes=[])
+
+    allowed_source_folders, source_path_filters = _resolve_wiki_scope(req.tenant_id)
+    try:
+        raw = await service.open_nodes(
+            node_ids,
+            allowed_source_folders=allowed_source_folders,
+            source_path_filters=source_path_filters,
+        )
+    except Exception:
+        logger.exception("Wiki open failed for %r", node_ids)
+        return WikiOpenResult(nodes=[])
+
+    nodes = [
+        WikiNodeView(
+            id=n["id"],
+            title_path=n.get("title_path", ""),
+            source=n.get("source", ""),
+            link=n.get("link", ""),
+            page=n.get("page", ""),
+            content=n.get("content", ""),
+            children=[WikiChildView(**c) for c in n.get("children", [])],
+            related=[WikiChildView(**r) for r in n.get("related", [])],
+        )
+        for n in raw
+    ]
+    return WikiOpenResult(nodes=nodes)
 
 
 if __name__ == "__main__":

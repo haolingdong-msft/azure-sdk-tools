@@ -123,3 +123,56 @@ def test_serialisation_round_trip():
     # Embedding index round-trips through bytes.
     idx2 = EmbeddingIndex.from_bytes(index.to_npy_bytes(), index.ids)
     assert np.allclose(idx2.matrix, index.matrix)
+
+
+def test_map_returns_handles_no_body():
+    tree, index = build_wiki_tree(CORPUS, synth_mode="extractive", embed_mode="hashing")
+    retriever = WikiRetriever(tree, index)
+    he = HashingEmbedder()
+    entries = retriever.map(
+        "How does the @added decorator work?",
+        embed_query=lambda q: he.embed([q])[0],
+        entry_k=6,
+    )
+    assert entries, "map should return entries"
+    e = entries[0]
+    # Map entries carry handles + summary, never raw section body.
+    assert set(["id", "title_path", "summary", "kind", "has_children", "doc_id"]).issubset(e)
+    assert "content" not in e and "page" not in e
+    assert e["id"] in tree.nodes
+
+
+def test_open_returns_page_evidence_and_handles():
+    tree, index = build_wiki_tree(CORPUS, synth_mode="extractive", embed_mode="hashing")
+    retriever = WikiRetriever(tree, index)
+    # Open the versioning doc node → expect an overview page + child handles.
+    doc = next(
+        n for n in tree.nodes.values()
+        if n.kind == KIND_DOC and n.source_path == "typespec_docs/versioning.md"
+    )
+    opened = retriever.open([doc.id])
+    assert len(opened) == 1
+    node = opened[0]
+    assert node["id"] == doc.id
+    assert node["page"], "doc node should carry a rolled-up overview page"
+    assert isinstance(node["children"], list)
+    assert all("id" in c and "title" in c for c in node["children"])
+    assert "rel_title" in node  # for backend link resolution
+
+
+def test_map_open_scoped():
+    tree, index = build_wiki_tree(CORPUS, synth_mode="extractive", embed_mode="hashing")
+    retriever = WikiRetriever(tree, index)
+    he = HashingEmbedder()
+    entries = retriever.map(
+        "@added compatibility",
+        embed_query=lambda q: he.embed([q])[0],
+        allowed_sources={"api_guidelines"},
+    )
+    assert all(e["source"] == "api_guidelines" for e in entries)
+    # Opening an out-of-scope node id is filtered out.
+    ts_doc = next(
+        n for n in tree.nodes.values()
+        if n.kind == KIND_DOC and n.source == "typespec_docs"
+    )
+    assert retriever.open([ts_doc.id], allowed_sources={"api_guidelines"}) == []

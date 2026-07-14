@@ -32,7 +32,7 @@ from agent_framework_foundry_hosting import ResponsesHostServer
 import config.app_config as app_config
 from config.app_config import get as cfg
 from tools.knowledge_tools import KnowledgeTools
-from tools.wiki_knowledge_tools import WikiKnowledgeTools
+from tools.wiki_nav_tools import WikiNavTools
 from tools.web_tools import WebTools
 from tools.ado_mcp_tools import create_ado_mcp_tool
 from tools.github_mcp_tools import create_github_mcp_tool
@@ -50,7 +50,9 @@ from utils.memory_context_provider import MemoryContextProvider
 logger = logging.getLogger(__name__)
 
 # -- Agent configuration constants ----------------------------------------
-MAX_TOOL_CALL_ITERATIONS = 5
+# Navigation (wiki_map → wiki_open → optional drill-down) needs a few tool-call
+# rounds, so allow a slightly higher iteration ceiling than the KB-only path.
+MAX_TOOL_CALL_ITERATIONS = 6
 MAX_TOOL_CALLS_PER_TURN = 10
 
 # Strong refs to fire-and-forget startup tasks so they aren't GC'd mid-flight.
@@ -62,6 +64,25 @@ def _load_instructions(file_path: Path) -> str:
     if not file_path.exists():
         raise FileNotFoundError(f"Agent instructions file not found: {file_path}")
     return file_path.read_text(encoding="utf-8").strip()
+
+
+# Prepended to the base instruction when KNOWLEDGE_MODE=wiki_only, so the agent
+# grounds only on the wiki navigation path (the KB tool is not registered).
+_WIKI_ONLY_DIRECTIVE = """# KNOWLEDGE MODE: WIKI-ONLY (OVERRIDE — HIGHEST PRIORITY)
+
+The `search_knowledge_base` tool is DISABLED in this configuration. Wherever the
+instructions below tell you to call `search_knowledge_base`, you MUST instead
+use the wiki navigation tools as your SOLE grounding source:
+
+1. Call `wiki_map` with a full-sentence question to get a map of relevant nodes.
+2. Call `wiki_open` on the 2–4 most relevant node ids (include the `doc_id` for
+   the cross-document overview) to read their distilled `page` + `content`.
+3. If a node's `children`/`related` handles point at something more specific,
+   open those too (one more round at most), then answer.
+
+Base your answer on the opened `page` + `content` and cite each node's `link`.
+Do NOT mention that `search_knowledge_base` is unavailable — just navigate the
+wiki. Every domain question still REQUIRES a `wiki_map` + `wiki_open` sequence."""
 
 
 async def main() -> None:
@@ -91,20 +112,44 @@ async def main() -> None:
 
     # Init Tools (synchronous / instant)
     knowledge_tools = KnowledgeTools()
-    wiki_knowledge_tools = WikiKnowledgeTools()
+    wiki_nav_tools = WikiNavTools()
     web_tools = WebTools()
     pipeline_tools = PipelineTools()
     web_search_tool = agent_client.get_web_search_tool(
         search_context_size="medium",
     )
 
-    tools = [
-        knowledge_tools.search_knowledge_base,
-        wiki_knowledge_tools.search_wiki,
-        web_tools.web_fetch,
-        pipeline_tools.azsdk_analyze_pipeline,
-        web_search_tool,
-    ]
+    # Knowledge mode controls which retrieval paths the agent gets:
+    #   * hybrid    — KB search + wiki-tree navigation (default, production).
+    #   * wiki_only — wiki-tree navigation only (KB tool removed); used to
+    #                 measure whether the new path alone matches accuracy.
+    #   * kb_only   — KB search only (no wiki tools).
+    knowledge_mode = cfg("KNOWLEDGE_MODE", "hybrid").lower()
+    enable_kb = knowledge_mode in ("hybrid", "kb_only")
+    enable_wiki = knowledge_mode in ("hybrid", "wiki_only")
+
+    tools = []
+    if enable_kb:
+        tools.append(knowledge_tools.search_knowledge_base)
+    if enable_wiki:
+        tools.append(wiki_nav_tools.wiki_map)
+        tools.append(wiki_nav_tools.wiki_open)
+    tools.extend(
+        [
+            web_tools.web_fetch,
+            pipeline_tools.azsdk_analyze_pipeline,
+            web_search_tool,
+        ]
+    )
+    logger.info(
+        "Knowledge mode=%s (kb=%s, wiki=%s)", knowledge_mode, enable_kb, enable_wiki
+    )
+
+    # In wiki-only mode the KB tool is absent, but the base instruction mandates
+    # search_knowledge_base. Prepend an override so the agent grounds solely on
+    # the wiki navigation tools without narrating the KB tool's absence.
+    if knowledge_mode == "wiki_only":
+        instructions = _WIKI_ONLY_DIRECTIVE + "\n\n" + instructions
 
     # Parallelise slow async startup tasks to reduce cold-start latency.
     async def _init_memory() -> None:

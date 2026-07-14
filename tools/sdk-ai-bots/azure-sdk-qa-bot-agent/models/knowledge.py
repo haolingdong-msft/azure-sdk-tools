@@ -163,6 +163,80 @@ class WikiQueryRequest(BaseModel):
     )
 
 
+# ---------------------------------------------------------------------------
+# Wiki-tree navigation (map / open) — the reasoning-based retrieval path
+# ---------------------------------------------------------------------------
+# Instead of collapsing the wiki tree into flat (chunk, link) references, the
+# navigation tools let the chat agent reason over the structure like PageIndex:
+# ``wiki_map`` returns a lightweight MAP of relevant nodes (title path +
+# summary, no body) so the agent can decide *where* to look; ``wiki_open`` then
+# returns the full distilled page + evidence + children/related handles for the
+# nodes the agent chose, so it can read whole pages and drill further.
+
+
+class WikiMapEntry(BaseModel):
+    """One node on the map: enough to decide whether to open it, no body text."""
+
+    id: str = Field(..., description="Opaque node handle to pass to wiki_open.")
+    title_path: str = Field("", description="H1 | H2 | H3 heading path of the node.")
+    summary: str = Field("", description="One-line description of what the node covers.")
+    source: str = ""
+    kind: str = Field("", description="root | folder | doc | section.")
+    has_children: bool = Field(False, description="Whether the node can be drilled into.")
+    doc_id: str = Field("", description="Handle of the enclosing document node (openable for its overview).")
+    doc_title: str = ""
+    score: float = 0.0
+
+
+class WikiMapResult(BaseModel):
+    """Output of ``wiki_map`` / ``POST /wiki/map`` — a ranked map of nodes."""
+
+    entries: list[WikiMapEntry] = []
+    query: str = ""
+
+
+class WikiMapRequest(BaseModel):
+    """Request body for ``POST /wiki/map``."""
+
+    query: str = Field(..., description="Natural-language query to locate on the wiki tree.")
+    tenant_id: str | None = None
+
+
+class WikiChildView(BaseModel):
+    """A child or related-node handle the agent can open next."""
+
+    id: str
+    title: str = ""
+    summary: str = ""
+    source: str = ""
+
+
+class WikiNodeView(BaseModel):
+    """A fully opened node: the distilled page + evidence + navigation handles."""
+
+    id: str
+    title_path: str = ""
+    source: str = ""
+    link: str = Field("", description="Resolved source document URL for citation.")
+    page: str = Field("", description="Rolled-up cross-document overview page (may be empty for leaves).")
+    content: str = Field("", description="Raw source section text — the citable evidence.")
+    children: list[WikiChildView] = Field(default_factory=list, description="Sub-sections to drill into.")
+    related: list[WikiChildView] = Field(default_factory=list, description="Cross-linked nodes in other documents.")
+
+
+class WikiOpenResult(BaseModel):
+    """Output of ``wiki_open`` / ``POST /wiki/open``."""
+
+    nodes: list[WikiNodeView] = []
+
+
+class WikiOpenRequest(BaseModel):
+    """Request body for ``POST /wiki/open``."""
+
+    node_ids: list[str] = Field(default_factory=list, description="Node handles from wiki_map (or children/related).")
+    tenant_id: str | None = None
+
+
 class DocumentContext(BaseModel):
     """A knowledge document in the eval-pipeline format (document_* keys)."""
 
