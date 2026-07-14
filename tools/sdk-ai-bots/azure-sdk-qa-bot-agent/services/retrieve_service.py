@@ -132,26 +132,33 @@ class RetrieveService:
         # -- 3. Synthesise: domain digest + routed docs' knowledge cards -------
         knowledge_refs: list[Reference] = []
 
-        # 3a. Domain knowledge — the top routed folder's rolled-up digest, so the
+        # 3a. Domain knowledge — a routed folder's rolled-up digest, so the
         # agent gets broad "what an expert knows about this area" background.
+        # Prefer folders that actually HAVE a digest (some folders, e.g. Q&A
+        # collections, have none) rather than blindly taking the top folder.
         if wiki.enabled and routed_folders and self._domain_top() > 0:
             try:
-                digests = await wiki.domain_digests(routed_folders[: self._domain_top()])
+                digests = await wiki.domain_digests(routed_folders)
             except Exception:
                 logger.warning("retrieve: domain digest failed", exc_info=True)
                 digests = {}
-            for folder in routed_folders[: self._domain_top()]:
+            added = 0
+            for folder in routed_folders:
                 page = (digests.get(folder) or "").strip()
-                if page:
-                    knowledge_refs.append(
-                        Reference(
-                            title=f"Domain knowledge: {folder}",
-                            source=folder,
-                            link="",
-                            content=page,
-                            score=1.0,
-                        )
+                if not page:
+                    continue
+                knowledge_refs.append(
+                    Reference(
+                        title=f"Domain knowledge: {folder}",
+                        source=folder,
+                        link="",
+                        content=page,
+                        score=1.0,
                     )
+                )
+                added += 1
+                if added >= self._domain_top():
+                    break
 
         # 3b. Document knowledge cards — dense facts for the routed documents.
         if wiki.enabled and overview_doc_ids:

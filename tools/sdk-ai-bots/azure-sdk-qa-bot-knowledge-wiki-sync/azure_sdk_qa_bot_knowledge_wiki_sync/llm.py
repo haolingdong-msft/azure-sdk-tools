@@ -241,9 +241,12 @@ class AzureOpenAISynthesizer:
             return ""
         user = f"Area: {title}\n\nDocument knowledge cards:\n{cards[:9000]}"
         try:
-            return self._complete(_DIGEST_SYS, user, max_tokens=400) or (
-                ExtractiveSynthesizer().digest_knowledge(title, child_cards)
-            )
+            out = self._complete(_DIGEST_SYS, user, max_tokens=400)
+            if not out:
+                # Reasoning models can spend the whole budget on reasoning and
+                # return empty; retry once with a larger completion budget.
+                out = self._complete(_DIGEST_SYS, user, max_tokens=1000)
+            return out or ExtractiveSynthesizer().digest_knowledge(title, child_cards)
         except Exception:
             logger.warning("digest_knowledge failed, using extractive fallback", exc_info=True)
             return ExtractiveSynthesizer().digest_knowledge(title, child_cards)
