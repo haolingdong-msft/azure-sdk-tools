@@ -670,9 +670,9 @@ function DeleteAndPurgeGroups {
 
         # For storage tests specifically, if they are aborted then blobs with immutability policies
         # can be left around which prevent deletion.
-        # These helpers throw in CI when the group prefix doesn't start with 'rg-' or 'SSS3PT_rg-'
+        # Remove-WormStorageAccounts and Remove-StorageSyncServices throw in CI when the group prefix doesn't start with 'rg-' or 'SSS3PT_rg-'
         # (a safety guard against wildcard-matching non-live-test resources). We still want the
-        # resource group delete to be attempted even if the helpers fail/throw for that reason,
+        # resource group delete to be attempted even if those helpers fail/throw for that reason,
         # so wrap each call in its own try/catch and continue.
         $ci = $null -ne $env:SYSTEM_TEAMPROJECTID
         if ($rg.Tags?.ContainsKey('ServiceDirectory') -and $rg.Tags.ServiceDirectory -like '*storage*') {
