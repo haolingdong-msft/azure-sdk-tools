@@ -33,6 +33,7 @@ import config.app_config as app_config
 from config.app_config import get as cfg
 from tools.knowledge_tools import KnowledgeTools
 from tools.wiki_nav_tools import WikiNavTools
+from tools.retrieve_tools import RetrieveTools
 from tools.web_tools import WebTools
 from tools.ado_mcp_tools import create_ado_mcp_tool
 from tools.github_mcp_tools import create_github_mcp_tool
@@ -85,6 +86,25 @@ Do NOT mention that `search_knowledge_base` is unavailable — just navigate the
 wiki. Every domain question still REQUIRES a `wiki_map` + `wiki_open` sequence."""
 
 
+# Prepended to the base instruction when KNOWLEDGE_MODE=routed. A single
+# `retrieve` tool replaces both `search_knowledge_base` and the wiki navigation
+# tools; it fuses tree routing + KB recall + overview synthesis server-side.
+_ROUTED_DIRECTIVE = """# KNOWLEDGE MODE: ROUTED RETRIEVAL (OVERRIDE — HIGHEST PRIORITY)
+
+Your ONLY knowledge-retrieval tool is `retrieve`. The `search_knowledge_base`,
+`wiki_map`, and `wiki_open` tools are NOT available. Wherever the instructions
+below tell you to call `search_knowledge_base` (or any wiki tool), call
+`retrieve` instead — ONCE per domain question, in the turn-1 parallel batch,
+passing the `tenant_id` from the active skill's [skill_tenant_id] line.
+
+`retrieve` returns one merged, relevance-ranked reference set: wide knowledge-base
+recall focused on the most relevant documents, plus rolled-up cross-document
+`… (overview)` pages. Base your answer on the returned `content`, lead with the
+direct answer, cover every specific fact the question needs, and cite each
+reference's `link`. Do NOT mention that other tools are unavailable — just call
+`retrieve`. Every domain question REQUIRES a `retrieve` call."""
+
+
 async def main() -> None:
     """Start the hosted Chat Agent as an HTTP server."""
     await app_config.init()
@@ -113,6 +133,7 @@ async def main() -> None:
     # Init Tools (synchronous / instant)
     knowledge_tools = KnowledgeTools()
     wiki_nav_tools = WikiNavTools()
+    retrieve_tools = RetrieveTools()
     web_tools = WebTools()
     pipeline_tools = PipelineTools()
     web_search_tool = agent_client.get_web_search_tool(
@@ -120,15 +141,20 @@ async def main() -> None:
     )
 
     # Knowledge mode controls which retrieval paths the agent gets:
-    #   * hybrid    — KB search + wiki-tree navigation (default, production).
-    #   * wiki_only — wiki-tree navigation only (KB tool removed); used to
-    #                 measure whether the new path alone matches accuracy.
+    #   * hybrid    — KB search + wiki-tree navigation (both tools, agent merges).
+    #   * routed    — single coarse-to-fine `retrieve` tool: the tree routes,
+    #                 KB recalls wide within scope, overview pages synthesise
+    #                 (server-side fused). Default.
+    #   * wiki_only — wiki-tree navigation only (KB tool removed).
     #   * kb_only   — KB search only (no wiki tools).
-    knowledge_mode = cfg("KNOWLEDGE_MODE", "hybrid").lower()
+    knowledge_mode = cfg("KNOWLEDGE_MODE", "routed").lower()
     enable_kb = knowledge_mode in ("hybrid", "kb_only")
     enable_wiki = knowledge_mode in ("hybrid", "wiki_only")
+    enable_routed = knowledge_mode == "routed"
 
     tools = []
+    if enable_routed:
+        tools.append(retrieve_tools.retrieve)
     if enable_kb:
         tools.append(knowledge_tools.search_knowledge_base)
     if enable_wiki:
@@ -142,8 +168,18 @@ async def main() -> None:
         ]
     )
     logger.info(
-        "Knowledge mode=%s (kb=%s, wiki=%s)", knowledge_mode, enable_kb, enable_wiki
+        "Knowledge mode=%s (routed=%s, kb=%s, wiki=%s)",
+        knowledge_mode,
+        enable_routed,
+        enable_kb,
+        enable_wiki,
     )
+
+    # Some modes remove search_knowledge_base, but the base instruction mandates
+    # it. Prepend an override so the agent grounds on the available tool(s)
+    # without narrating the KB tool's absence.
+    if knowledge_mode == "routed":
+        instructions = _ROUTED_DIRECTIVE + "\n\n" + instructions
 
     # In wiki-only mode the KB tool is absent, but the base instruction mandates
     # search_knowledge_base. Prepend an override so the agent grounds solely on

@@ -205,6 +205,19 @@ _intention_service = IntentionService()
 _knowledge_service = KnowledgeService()
 _thread_memory_service = ThreadMemoryService()
 
+# Lazily created so the KnowledgeTools / wiki client are only built when the
+# coarse-to-fine /retrieve endpoint is actually used.
+_retrieve_service = None
+
+
+def _get_retrieve_service():
+    global _retrieve_service
+    if _retrieve_service is None:
+        from services.retrieve_service import RetrieveService
+
+        _retrieve_service = RetrieveService()
+    return _retrieve_service
+
 
 @app.post(
     "/completion", response_model=ChatResponse
@@ -490,6 +503,34 @@ async def wiki_open(req: WikiOpenRequest) -> WikiOpenResult:
         for n in raw
     ]
     return WikiOpenResult(nodes=nodes)
+
+
+@app.post("/retrieve", response_model=WikiSearchResult)
+async def retrieve(req: WikiQueryRequest) -> WikiSearchResult:
+    """Coarse-to-fine tree-routed hybrid retrieval (Approach A), server-side.
+
+    Runs the wiki tree as a *router* to pick relevant source folders + overview
+    documents, runs KB search scoped to those folders for wide recall, and
+    attaches the routed documents' distilled overview pages — merged into one
+    ranked reference set. Fails soft (empty references).
+    """
+    normalised_query = (req.query or "").strip()
+    if not normalised_query:
+        return WikiSearchResult(references=[], query="")
+
+    allowed_source_folders, source_path_filters = _resolve_wiki_scope(req.tenant_id)
+    try:
+        refs = await _get_retrieve_service().retrieve(
+            normalised_query,
+            (req.tenant_id or "").strip(),
+            allowed_source_folders=allowed_source_folders,
+            source_path_filters=source_path_filters,
+        )
+    except Exception:
+        logger.exception("retrieve failed for %r", normalised_query)
+        return WikiSearchResult(references=[], query=normalised_query)
+
+    return WikiSearchResult(references=refs, query=normalised_query)
 
 
 if __name__ == "__main__":
