@@ -40,6 +40,10 @@ class Synthesizer(Protocol):
 
     def roll_up(self, title: str, child_briefs: Sequence[str], preamble: str) -> str: ...
 
+    def extract_knowledge(self, title: str, full_text: str) -> str: ...
+
+    def digest_knowledge(self, title: str, child_cards: Sequence[str]) -> str: ...
+
 
 class Embedder(Protocol):
     """Maps texts to unit-length vectors."""
@@ -80,6 +84,25 @@ class ExtractiveSynthesizer:
                 parts.append(f"- {brief}")
         return "\n".join(parts).strip()
 
+    def extract_knowledge(self, title: str, full_text: str) -> str:
+        # Deterministic best-effort: bullet the lead sentence of each block.
+        blocks = [b.strip() for b in full_text.split("\n\n") if b.strip()]
+        bullets = []
+        for b in blocks[:20]:
+            lead = _first_sentences(b, n=1, limit=200)
+            if lead and not lead.startswith("#"):
+                bullets.append(f"- {lead}")
+        return "\n".join(bullets).strip()
+
+    def digest_knowledge(self, title: str, child_cards: Sequence[str]) -> str:
+        seen: list[str] = []
+        for card in child_cards:
+            for line in card.splitlines():
+                line = line.strip()
+                if line.startswith("- ") and line not in seen:
+                    seen.append(line)
+        return "\n".join(seen[:25]).strip()
+
 
 class HashingEmbedder:
     """Deterministic bag-of-words hashing embedder (offline cosine works).
@@ -118,25 +141,65 @@ _ROLLUP_SYS = (
     "relate and where to look for what. Be factual and specific; do not invent "
     "APIs or facts beyond the briefs. Output markdown prose, no headings."
 )
+_KNOWLEDGE_SYS = (
+    "You are building an expert KNOWLEDGE CARD from Azure SDK / TypeSpec "
+    "documentation, so an agent can answer questions FROM internalized knowledge "
+    "rather than re-reading raw docs. Extract the concrete, reusable knowledge "
+    "the document teaches: definitions, rules, exact decorator / API / property "
+    "names and their effects, required steps and their order, constraints, "
+    "defaults, valid values, and common gotchas or error causes. Write dense, "
+    "declarative facts an expert would remember, as tight bullet points. Include "
+    "specific names and syntax. Do NOT use navigation phrases like 'this section "
+    "covers', 'refer to', or 'see below'. Only state knowledge grounded in the "
+    "document; never invent APIs or facts. Max ~250 words."
+)
+_DIGEST_SYS = (
+    "You are compiling a compact DOMAIN KNOWLEDGE digest for one area of Azure "
+    "SDK / TypeSpec, from the knowledge cards of its documents. Produce the core "
+    "rules, decorators/APIs, and constraints an expert must know about this area, "
+    "as tight declarative bullets. Merge duplicates, keep the most important and "
+    "specific facts, drop document-specific trivia. No navigation phrases. Max "
+    "~180 words."
+)
 
 
 class AzureOpenAISynthesizer:
-    """Azure OpenAI chat-completions synthesizer (AAD or API-key auth)."""
+    """Azure OpenAI chat-completions synthesizer (AAD or API-key auth).
+
+    Handles both classic chat models (``gpt-4.1``: ``temperature`` +
+    ``max_tokens``) and reasoning models (``gpt-5.x``: no custom temperature,
+    ``max_completion_tokens``, and a reasoning-token budget). The parameter shape
+    is detected once from the deployment name and retried on the classic 400 if
+    the guess is wrong.
+    """
 
     def __init__(self, client, deployment: str):
         self._client = client
         self._deployment = deployment
+        # gpt-5* / o-series are reasoning models with the newer param shape.
+        dl = deployment.lower()
+        self._reasoning = dl.startswith(("gpt-5", "gpt5", "o1", "o3", "o4"))
 
     def _complete(self, system: str, user: str, max_tokens: int) -> str:
-        resp = self._client.chat.completions.create(
-            model=self._deployment,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            temperature=0.2,
-            max_tokens=max_tokens,
-        )
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        if self._reasoning:
+            # Reasoning models spend tokens on hidden reasoning, so give the
+            # completion budget generous headroom over the visible-text target.
+            resp = self._client.chat.completions.create(
+                model=self._deployment,
+                messages=messages,
+                max_completion_tokens=max_tokens * 4,
+            )
+        else:
+            resp = self._client.chat.completions.create(
+                model=self._deployment,
+                messages=messages,
+                temperature=0.2,
+                max_tokens=max_tokens,
+            )
         return (resp.choices[0].message.content or "").strip()
 
     def summarize(self, title: str, body: str) -> str:
@@ -158,6 +221,33 @@ class AzureOpenAISynthesizer:
         except Exception:
             logger.warning("roll_up failed, using extractive fallback", exc_info=True)
             return ExtractiveSynthesizer().roll_up(title, child_briefs, preamble)
+
+    def extract_knowledge(self, title: str, full_text: str) -> str:
+        full_text = full_text.strip()
+        if not full_text:
+            return ""
+        user = f"Document: {title}\n\n{full_text[:9000]}"
+        try:
+            return self._complete(_KNOWLEDGE_SYS, user, max_tokens=600) or (
+                ExtractiveSynthesizer().extract_knowledge(title, full_text)
+            )
+        except Exception:
+            logger.warning("extract_knowledge failed, using extractive fallback", exc_info=True)
+            return ExtractiveSynthesizer().extract_knowledge(title, full_text)
+
+    def digest_knowledge(self, title: str, child_cards: Sequence[str]) -> str:
+        cards = "\n\n".join(c.strip() for c in child_cards if c.strip())
+        if not cards:
+            return ""
+        user = f"Area: {title}\n\nDocument knowledge cards:\n{cards[:9000]}"
+        try:
+            return self._complete(_DIGEST_SYS, user, max_tokens=400) or (
+                ExtractiveSynthesizer().digest_knowledge(title, child_cards)
+            )
+        except Exception:
+            logger.warning("digest_knowledge failed, using extractive fallback", exc_info=True)
+            return ExtractiveSynthesizer().digest_knowledge(title, child_cards)
+
 
 
 class AzureOpenAIEmbedder:
@@ -197,7 +287,7 @@ def _azure_openai_client():
         logger.warning("openai package not installed; using deterministic backend")
         return None
 
-    api_version = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-10-21")
+    api_version = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
     api_key = os.environ.get("AZURE_OPENAI_API_KEY")
     if api_key:
         return AzureOpenAI(azure_endpoint=endpoint, api_key=api_key, api_version=api_version)

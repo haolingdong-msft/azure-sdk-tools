@@ -54,6 +54,13 @@ class RetrieveService:
         except (TypeError, ValueError):
             return 2
 
+    @staticmethod
+    def _domain_top() -> int:
+        try:
+            return int(app_config.get("WIKI_ROUTE_DOMAIN_TOP", "1"))
+        except (TypeError, ValueError):
+            return 1
+
     async def retrieve(
         self,
         query: str,
@@ -122,8 +129,31 @@ class RetrieveService:
                 except Exception:
                     logger.exception("retrieve: unscoped KB retry failed")
 
-        # -- 3. Synthesise: attach routed docs' overview pages -----------------
-        overview_refs: list[Reference] = []
+        # -- 3. Synthesise: domain digest + routed docs' knowledge cards -------
+        knowledge_refs: list[Reference] = []
+
+        # 3a. Domain knowledge — the top routed folder's rolled-up digest, so the
+        # agent gets broad "what an expert knows about this area" background.
+        if wiki.enabled and routed_folders and self._domain_top() > 0:
+            try:
+                digests = await wiki.domain_digests(routed_folders[: self._domain_top()])
+            except Exception:
+                logger.warning("retrieve: domain digest failed", exc_info=True)
+                digests = {}
+            for folder in routed_folders[: self._domain_top()]:
+                page = (digests.get(folder) or "").strip()
+                if page:
+                    knowledge_refs.append(
+                        Reference(
+                            title=f"Domain knowledge: {folder}",
+                            source=folder,
+                            link="",
+                            content=page,
+                            score=1.0,
+                        )
+                    )
+
+        # 3b. Document knowledge cards — dense facts for the routed documents.
         if wiki.enabled and overview_doc_ids:
             try:
                 opened = await wiki.open_nodes(
@@ -132,45 +162,55 @@ class RetrieveService:
                     source_path_filters=source_path_filters,
                 )
             except Exception:
-                logger.warning("retrieve: overview open failed", exc_info=True)
+                logger.warning("retrieve: knowledge card open failed", exc_info=True)
                 opened = []
+            card_count = 0
             for node in opened:
                 page = (node.get("page") or "").strip()
                 if not page:
                     continue
-                title = node.get("title_path") or "Overview"
-                overview_refs.append(
+                title = node.get("title_path") or "Knowledge"
+                knowledge_refs.append(
                     Reference(
-                        title=f"{title} (overview)",
+                        title=f"{title} (knowledge)",
                         source=node.get("source") or "wiki",
                         link=node.get("link") or "",
                         content=page,
                         score=1.0,
                     )
                 )
-                if len(overview_refs) >= self._overview_top():
+                card_count += 1
+                if card_count >= self._overview_top():
                     break
 
-        merged = _merge(kb_refs, overview_refs)
+        merged = _merge(kb_refs, knowledge_refs)
         logger.info(
-            "retrieve: routed_folders=%s kb=%d overview=%d merged=%d (query=%r)",
+            "retrieve: routed_folders=%s kb=%d knowledge=%d merged=%d (query=%r)",
             routed_folders,
             len(kb_refs),
-            len(overview_refs),
+            len(knowledge_refs),
             len(merged),
             query[:80],
         )
         return merged
 
 
-def _merge(kb_refs: list[Reference], overview_refs: list[Reference]) -> list[Reference]:
-    """KB evidence first (wide recall), then distinct overview pages (synthesis).
+def _merge(kb_refs: list[Reference], knowledge_refs: list[Reference]) -> list[Reference]:
+    """Knowledge first (the agent reasons FROM it), then KB evidence.
 
-    De-duplicates KB refs by link; overview refs are always kept (they carry a
-    distilled page, not the same content as a KB chunk) but de-duplicated among
-    themselves by link.
+    Leads with the distilled knowledge (domain digest + document knowledge
+    cards) so the agent grounds on understanding, then supplies the KB chunks as
+    exact-wording evidence. KB refs are de-duplicated by link; knowledge refs are
+    always kept (distinct distilled content) but de-duplicated among themselves.
     """
     out: list[Reference] = []
+    seen_knowledge: set[str] = set()
+    for ref in knowledge_refs:
+        key = (ref.title or "").strip()
+        if key in seen_knowledge:
+            continue
+        seen_knowledge.add(key)
+        out.append(ref)
     seen_links: set[str] = set()
     for ref in kb_refs:
         key = (ref.link or ref.title or "").strip()
@@ -178,12 +218,5 @@ def _merge(kb_refs: list[Reference], overview_refs: list[Reference]) -> list[Ref
             continue
         if key:
             seen_links.add(key)
-        out.append(ref)
-    seen_overview: set[str] = set()
-    for ref in overview_refs:
-        key = (ref.link or ref.title or "").strip()
-        if key in seen_overview:
-            continue
-        seen_overview.add(key)
         out.append(ref)
     return out

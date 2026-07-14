@@ -26,7 +26,7 @@ from typing import Callable
 import numpy as np
 
 from .embeddings import EmbeddingIndex
-from .models import KIND_DOC, WikiTree
+from .models import KIND_DOC, KIND_FOLDER, WikiTree
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +230,20 @@ class WikiRetriever:
             )
             if len(out) >= entry_k:
                 break
+        return out
+
+    def folder_pages(self, sources: list[str]) -> dict[str, str]:
+        """Return ``{source_folder: domain-digest page}`` for the given folders.
+
+        The folder node's ``page`` is the rolled-up domain-knowledge digest
+        (knowledge build). Used to surface broad "what an expert knows about this
+        area" background alongside per-document knowledge cards.
+        """
+        wanted = set(sources)
+        out: dict[str, str] = {}
+        for node in self._tree.nodes.values():
+            if node.kind == KIND_FOLDER and node.title in wanted and node.page:
+                out[node.title] = node.page
         return out
 
     def open(

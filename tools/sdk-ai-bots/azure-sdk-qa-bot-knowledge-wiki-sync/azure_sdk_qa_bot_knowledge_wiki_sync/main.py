@@ -41,7 +41,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--blob", action="store_true", help="Build from blob and publish (production).")
     p.add_argument("--input", help="Local markdown dir (local mode).")
     p.add_argument("--output", default=".wiki-out", help="Local snapshot output dir (local mode).")
-    p.add_argument("--synth-mode", default="auto", choices=["auto", "llm", "llm-full", "extractive"])
+    p.add_argument("--synth-mode", default="auto", choices=["auto", "knowledge", "overview", "llm", "extractive"])
     p.add_argument("--embed-mode", default="auto", choices=["auto", "llm", "hashing"])
     p.add_argument("--top-k-links", type=int, default=3)
     p.add_argument("--min-link-sim", type=float, default=0.55)

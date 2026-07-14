@@ -1,27 +1,21 @@
-"""Bottom-up synthesis: fill node summaries and rolled-up wiki pages.
+"""Bottom-up synthesis: fill node summaries, knowledge cards, and domain digests.
 
-Walks the ToC tree **bottom-up** (children before parents) and fills:
+Two synthesis styles, selected by ``mode``:
 
-* **leaf sections** — a one-line ``summary`` (the raw text stays in
-  ``section_text`` as citable evidence);
-* **internal nodes** — a ``page`` rolled up from their children's summaries, and
-  a ``summary`` derived from that page.
+* ``overview`` (legacy) — internal nodes get a *navigation* roll-up page written
+  from their children's summaries. Good for "where to look", weak on facts.
+* ``knowledge`` (default for the knowledge path) — the artifact the agent should
+  reason FROM:
+    - **document** nodes get a **knowledge card**: dense, declarative facts /
+      rules / exact API names extracted by an LLM reading the document's *full
+      text* (not child summaries), so no information is lost to summary-of-
+      summaries;
+    - **folder** nodes get a **domain-knowledge digest** rolled up from their
+      documents' knowledge cards — the compact "what an expert knows about this
+      area" surface used for pre-loaded domain knowledge.
+  Leaf sections keep a cheap extractive ``summary`` (the embedding-entry text).
 
-Two synthesizers are used so cost can be targeted:
-
-* ``summarizer`` — writes every node's ``summary`` (and, for internal *sections*,
-  their extractive roll-up ``page``). Kept cheap (extractive) by default so the
-  embedding-entry text is stable.
-* ``page_writer`` — writes the **document-level** overview ``page`` (the
-  WeKnora-style cross-document distillation that retrieval surfaces as a
-  ``(overview)`` synthesis reference). This is where an LLM adds the most value,
-  so ``page_writer`` may be an LLM while ``summarizer`` stays extractive — a clean
-  A/B that changes only the surfaced overview pages.
-
-The tree hierarchy *is* the topic clustering, and the per-level roll-up *is* the
-hierarchical equivalent of GraphRAG's community reports — without entity
-extraction or community detection. Independent nodes are synthesised
-concurrently (bottom-up waves) so an LLM ``page_writer`` stays fast.
+Independent nodes at each level are processed concurrently.
 """
 
 from __future__ import annotations
@@ -31,9 +25,37 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 
 from .llm import Synthesizer, _first_sentences
-from .models import KIND_DOC, KIND_SECTION, WikiTree
+from .models import KIND_DOC, KIND_FOLDER, KIND_ROOT, KIND_SECTION, WikiTree
 
 logger = logging.getLogger(__name__)
+
+_MAX_DOC_TEXT_CHARS = 9000
+
+
+def _doc_full_text(tree: WikiTree, doc_id: str) -> str:
+    """Reconstruct a document's text from its section subtree, in reading order."""
+    parts: list[str] = []
+
+    def walk(nid: str) -> None:
+        node = tree.nodes.get(nid)
+        if node is None:
+            return
+        if node.header_path:
+            depth = min(len(node.header_path), 6)
+            parts.append(f"{'#' * depth} {node.title}")
+        if node.section_text:
+            parts.append(node.section_text)
+        for child in node.children:
+            walk(child)
+
+    doc = tree.nodes.get(doc_id)
+    if doc is None:
+        return ""
+    if doc.section_text:
+        parts.append(doc.section_text)
+    for child in doc.children:
+        walk(child)
+    return "\n\n".join(parts)[:_MAX_DOC_TEXT_CHARS]
 
 
 def synthesize_tree(
@@ -41,25 +63,28 @@ def synthesize_tree(
     summarizer: Synthesizer,
     page_writer: Synthesizer | None = None,
     *,
-    doc_pages_only: bool = True,
+    mode: str = "knowledge",
     max_children_briefs: int = 40,
     max_workers: int | None = None,
 ) -> None:
-    """Populate ``summary`` and ``page`` on every node, in place, bottom-up.
+    """Populate ``summary`` (all nodes) and ``page`` (internal nodes), bottom-up.
 
-    ``page_writer`` (defaults to ``summarizer``) writes document overview pages;
-    when ``doc_pages_only`` is True only ``doc`` nodes use it (internal sections
-    fall back to the cheap ``summarizer`` roll-up).
+    ``mode='knowledge'`` makes document ``page``s knowledge cards (from full doc
+    text) and folder ``page``s domain digests; ``mode='overview'`` keeps the
+    legacy navigation roll-ups. ``page_writer`` (defaults to ``summarizer``)
+    performs the LLM-heavy page synthesis.
     """
     page_writer = page_writer or summarizer
     if max_workers is None:
         max_workers = int(os.environ.get("WIKI_SYNTH_MAX_WORKERS", "16"))
+    knowledge = mode == "knowledge"
 
-    counts = {"leaf": 0, "doc_page": 0, "section_page": 0, "other": 0}
+    counts = {"leaf": 0, "doc_page": 0, "section_page": 0, "folder_digest": 0, "other": 0}
 
     def process(nid: str) -> str:
         node = tree.nodes[nid]
         children = tree.children_of(nid)
+
         if not children:
             node.summary = summarizer.summarize(node.title, node.section_text)
             return "leaf"
@@ -71,21 +96,40 @@ def synthesize_tree(
         ]
 
         if node.kind == KIND_DOC:
-            node.page = page_writer.roll_up(node.title, child_briefs, node.section_text)
+            if knowledge:
+                full_text = _doc_full_text(tree, nid)
+                node.page = page_writer.extract_knowledge(node.title, full_text)
+            else:
+                node.page = page_writer.roll_up(node.title, child_briefs, node.section_text)
             node.summary = _first_sentences(node.page, n=1, limit=300) or node.title
             return "doc_page"
+
         if node.kind == KIND_SECTION:
-            writer = summarizer if doc_pages_only else page_writer
-            node.page = writer.roll_up(node.title, child_briefs, node.section_text)
-            node.summary = _first_sentences(node.page, n=1, limit=300) or node.title
+            if knowledge:
+                # Section pages stay cheap; the doc card is the knowledge unit.
+                node.page = ExtractiveKnowledge(summarizer).roll(node, children)
+                node.summary = _first_sentences(node.page, n=1, limit=300) or node.title
+            else:
+                node.page = summarizer.roll_up(node.title, child_briefs, node.section_text)
+                node.summary = _first_sentences(node.page, n=1, limit=300) or node.title
             return "section_page"
-        # folder / root: cheap extractive topic list, no page.
+
+        if node.kind == KIND_FOLDER and knowledge:
+            doc_cards = [
+                c.page for c in children if c.kind == KIND_DOC and c.page
+            ][:max_children_briefs]
+            if doc_cards:
+                node.page = page_writer.digest_knowledge(node.title, doc_cards)
+            node.summary = (
+                f"{node.title}: " + ", ".join(c.title for c in children[:12])
+            )[:300]
+            return "folder_digest"
+
         node.summary = (
             f"{node.title}: covers " + ", ".join(c.title for c in children[:12])
         )[:300]
         return "other"
 
-    # Bottom-up waves: a node is ready once all its children are processed.
     pending = {nid: len(n.children) for nid, n in tree.nodes.items()}
     ready = [nid for nid, c in pending.items() if c == 0]
 
@@ -104,11 +148,30 @@ def synthesize_tree(
 
     tree.stats["synthesized"] = counts
     logger.info(
-        "synthesize_tree: %d leaf summaries, %d doc pages, %d section pages "
-        "(doc_pages_only=%s, workers=%d)",
+        "synthesize_tree(mode=%s): %d leaf, %d doc cards, %d section pages, "
+        "%d folder digests (workers=%d)",
+        mode,
         counts["leaf"],
         counts["doc_page"],
         counts["section_page"],
-        doc_pages_only,
+        counts["folder_digest"],
         max_workers,
     )
+
+
+class ExtractiveKnowledge:
+    """Cheap section-level page: concatenate child knowledge briefs (no LLM)."""
+
+    def __init__(self, summarizer: Synthesizer):
+        self._s = summarizer
+
+    def roll(self, node, children) -> str:
+        bullets = []
+        if node.section_text:
+            lead = _first_sentences(node.section_text, n=2, limit=300)
+            if lead:
+                bullets.append(lead)
+        for c in children:
+            if c.summary:
+                bullets.append(f"- {c.summary}")
+        return "\n".join(bullets).strip()

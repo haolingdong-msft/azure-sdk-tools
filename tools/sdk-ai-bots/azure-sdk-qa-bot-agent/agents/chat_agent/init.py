@@ -89,7 +89,7 @@ wiki. Every domain question still REQUIRES a `wiki_map` + `wiki_open` sequence."
 # Prepended to the base instruction when KNOWLEDGE_MODE=routed. A single
 # `retrieve` tool replaces both `search_knowledge_base` and the wiki navigation
 # tools; it fuses tree routing + KB recall + overview synthesis server-side.
-_ROUTED_DIRECTIVE = """# KNOWLEDGE MODE: ROUTED RETRIEVAL (OVERRIDE — HIGHEST PRIORITY)
+_ROUTED_DIRECTIVE = """# KNOWLEDGE MODE: ROUTED KNOWLEDGE RETRIEVAL (OVERRIDE — HIGHEST PRIORITY)
 
 Your ONLY knowledge-retrieval tool is `retrieve`. The `search_knowledge_base`,
 `wiki_map`, and `wiki_open` tools are NOT available. Wherever the instructions
@@ -97,12 +97,21 @@ below tell you to call `search_knowledge_base` (or any wiki tool), call
 `retrieve` instead — ONCE per domain question, in the turn-1 parallel batch,
 passing the `tenant_id` from the active skill's [skill_tenant_id] line.
 
-`retrieve` returns one merged, relevance-ranked reference set: wide knowledge-base
-recall focused on the most relevant documents, plus rolled-up cross-document
-`… (overview)` pages. Base your answer on the returned `content`, lead with the
-direct answer, cover every specific fact the question needs, and cite each
-reference's `link`. Do NOT mention that other tools are unavailable — just call
-`retrieve`. Every domain question REQUIRES a `retrieve` call."""
+`retrieve` returns three kinds of reference, in this order:
+1. **Domain knowledge: <area>** — distilled core rules/decorators/constraints an
+   expert knows about the area. Use it to frame your understanding.
+2. **… (knowledge)** — a document knowledge card: dense, declarative facts, exact
+   decorator/API/property names and their effects, steps, defaults, gotchas.
+3. Knowledge-base chunks — the original source text.
+
+ANSWER KNOWLEDGE-FIRST: build your answer FROM the knowledge references (1 and 2)
+as your understanding of the topic, then use the knowledge-base chunks (3) to
+confirm exact wording/names and fill any specific gaps. Prefer the facts stated
+in the knowledge cards; if a KB chunk contradicts a card, trust the KB source and
+note it. Lead with the direct answer, cover every specific fact the question
+needs, and cite the source `link` of the references you used (knowledge cards and
+KB chunks carry links; the domain digest does not). Do NOT mention tool
+availability. Every domain question REQUIRES a `retrieve` call."""
 
 
 async def main() -> None:

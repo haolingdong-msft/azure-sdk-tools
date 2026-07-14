@@ -221,6 +221,18 @@ class WikiTreeService:
                 node["page"] = page[:_SNIPPET_MAX_CHARS] + "\n… [truncated]"
         return raw
 
+    async def domain_digests(self, sources: list[str]) -> dict[str, str]:
+        """Return ``{source_folder: domain-knowledge digest}`` for the folders."""
+        if self._retriever is None:
+            status = await self.reload()
+            if not status.get("loaded"):
+                return {}
+        try:
+            return self._retriever.folder_pages(sources)
+        except Exception:
+            logger.warning("domain_digests failed", exc_info=True)
+            return {}
+
 
 def _resolve_link(source: str, rel_title: str) -> str:
     """Resolve a source + rel_title into a KB-style document URL."""
