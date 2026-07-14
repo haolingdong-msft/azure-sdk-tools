@@ -1,8 +1,5 @@
 # TypeSpec-to-SDK Release Workflow Spec
 
-> [!IMPORTANT]
-> **Review goal**: Validate the end-to-end workflow contract, stage ownership, gates, and unresolved decisions.
-
 ---
 
 ## Navigation
@@ -168,7 +165,7 @@ flowchart TD
 
 **Key insight**: After spec PR merge, the flow is largely **automated**. Service team re-engages only if SDK CI fails, API review has feedback, or release needs manual approval.
 
-> **ARM vs Data Plane divergence** — Same high-level flow but diverge at review gates. ARM requires ARM review sign-off + stricter resource model constraints. Data plane skips ARM review. See: [ARM review](https://eng.ms/docs/products/azure-developer-experience/design/api-specs-pr/arm-review)
+> **ARM vs Data Plane divergence** — Same high-level flow but diverge at review gates. ARM requires ARM review sign-off + stricter resource model constraints. Data plane skips ARM review.
 >
 > **Open question: Data-plane review model** — With the stewardship board being reconsidered, who reviews data-plane PRs? An emerging pattern: for ARM, if the REST API spec looks fine, we assume the SDK is ok to ship. For data-plane, if the SDK looks fine, we could assume the TypeSpec spec is ok to merge. This would mean ARM quality flows spec → SDK, while data-plane quality flows SDK → spec.
 
@@ -281,11 +278,11 @@ Build author-validation loop where agent auto-applies suppression decorators bas
 1. Validation steps run independently — no designed chain for failure ordering or unified PR comment.
 2. No endpoint liveness verification before spec PR merge — SDK may be generated for an undeployed API. *(Aspirational)*
 3. Avocado/OAV deprecation still in progress.
-4. `BreakingChangeReviewRequired` label routing to correct review team is undefined (CODEOWNERS, custom Action, or DevOps?).
+4. Breaking change label routing undefined for data-plane: both `BreakingChangeReviewRequired` and `BreakingChange-{Language}-Sdk` apply but have no review team or routing.
 
 #### Open questions
 
-- [ ] How should `BreakingChangeReviewRequired` label route to the correct review team? CODEOWNERS, custom Action, or DevOps?
+- [ ] How should breaking change labels route to the correct review team for data-plane?
 - [ ] Should spec-gen-sdk failures be PR comments, structured JSON, or both?
 
 </details>
@@ -570,9 +567,8 @@ The system uses **prompt chaining**: independent sub-skills invoked sequentially
 
 | Process | Link | Scope |
 |---------|------|-------|
-| Namespace approval | [Namespace approval (PR #44085)](https://github.com/Azure/azure-rest-api-specs/pull/44085) | Permissions, flow, labels — in progress |
-| ARM review | [ARM review](https://eng.ms/docs/products/azure-developer-experience/design/api-specs-pr/arm-review) | ARM-specific gates |
-| REST API spec review | [Review process](https://eng.ms/docs/products/azure-developer-experience/design/api-review) | Architect board flow |
+| Namespace approval | [Namespace review process](https://github.com/Azure/azure-rest-api-specs/blob/main/.github/workflows/src/namespace-approval/NAMESPACE-REVIEW-PROCESS.md) | Permissions, flow, labels -- live |
+| SDK API review (architecture board) | [Review process](https://eng.ms/docs/products/azure-developer-experience/design/api-review) | Architecture review board for SDK API review |
 | SDK API review (bridge) | [Arch board review process](https://github.com/Azure/azure-sdk/blob/main/.github/workflows/src/arch-board-review/ARCH-BOARD-REVIEW-PROCESS.md) | GitHub Form — **bridge** until ARH |
 | API Review Hub | [POC implementation (PR #49)](https://github.com/tjprescott/azure-sdk-tools/pull/49) | Synthetic review PRs replacing APIView |
 | Mgmt plane release | [Release process](https://eng.ms/docs/products/azure-developer-experience/plan/mgmt-sdk-release-process) | Service + SDK team responsibilities |
@@ -587,7 +583,7 @@ The system uses **prompt chaining**: independent sub-skills invoked sequentially
 - [ ] **D3**: Should service teams approve SDK PRs? (Not required today)
 - [ ] **D4**: Where does breaking-change enforcement live? (Spec level vs SDK level)
 - [ ] **D5**: What triggers auto-release after SDK PR merge? (Last E2E automation piece)
-- [ ] **D6**: How should `BreakingChangeReviewRequired` route to review team? (CODEOWNERS, Action, or DevOps)
+- [ ] **D6**: How should breaking change labels (`BreakingChangeReviewRequired` + `BreakingChange-{Language}-Sdk`) route to review team for data-plane?
 - [ ] **D7**: Should spec-gen-sdk failures be PR comments, structured JSON, or both?
 - [ ] **D8**: For patch releases — what triggers the workflow differently?
 
@@ -606,7 +602,7 @@ The system uses **prompt chaining**: independent sub-skills invoked sequentially
 | 4 | Release trigger not automated — auto-trigger on SDK PR merge being built | 5 | @raych1 | Yes | In progress |
 | 5 | ARH review PR creation not automated on SDK PRs | 4 | @tjprescott | Yes | Open |
 | 6 | Breaking change findings require manual resolution | 1, 2 | @markcowl / @chunyu3 | No | Open |
-| 7 | `BreakingChangeReviewRequired` label routing to correct review team undefined | 2 | @raych1 / @markcowl | No | Open |
+| 7 | Breaking change label routing undefined for data-plane: `BreakingChangeReviewRequired` (spec-level) and `BreakingChange-{Language}-Sdk` (SDK-level) both apply to data-plane but have no review team or routing defined | 2 | @raych1 / @markcowl / @lmazuel | No | Open |
 | 8 | SDK breaking change detection integration in progress | 4 | @chunyu3 / @raych1 | No | In progress |
 | 9 | REST API spec review gates not documented in detail (different review teams, labels, and blocking behavior) | 2, 4 | @samvaity / @prkannap | No | Open |
 | 10 | Release pipeline provisioning delay for new RPs | 5 | EngSys | No | In progress |
@@ -647,24 +643,20 @@ The system uses **prompt chaining**: independent sub-skills invoked sequentially
 **Status**: Three workstreams converging:
 1. **GitHub Forms + Actions (shipped)** — `arch-board-review.yml` is bridge until ARH. `namespace-review.yml` stays long-term.
 2. **API Review Hub (in progress)** — Replaces APIView for SDK review. Namespace out of scope.
-3. **Spec PR-based namespace approval ([PR #44085](https://github.com/Azure/azure-rest-api-specs/pull/44085), in progress)** — Namespace approval on spec PR merge. CI extracts namespaces, applies `namespace-<lang>-pending` labels, blocks merge until approved.
+3. **Spec PR-based namespace approval ([process doc](https://github.com/Azure/azure-rest-api-specs/blob/main/.github/workflows/src/namespace-approval/NAMESPACE-REVIEW-PROCESS.md), live)** — Namespace approval on spec PR merge. CI extracts namespaces, applies `namespace-<lang>-pending` labels, blocks merge until approved.
 
 </details>
 
 <details>
 <summary>Exception 2: Breaking Change Reviews</summary>
 
-**Description**: Breaking changes require review team approval. Separate process with own team and labels.
+**Description**: Breaking changes are detected at two levels. Both levels apply to ARM and data-plane specs.
 
-**ARM breaking changes**: `BreakingChangeReviewRequired` label applied by CI on spec PRs. Routed to ARM breaking change review team. Must receive `Approved-BreakingChange` label before merge.
+**Spec-level breaking changes** (`BreakingChangeReviewRequired`): Applied by CI on any spec PR with breaking changes (ARM and data-plane). For ARM, routed to ARM breaking change review team who must apply `Approved-BreakingChange` before merge. For data-plane, the label is applied but there is no defined review team or routing today (Gap #9).
 
-**SDK breaking changes** (all specs): `BreakingChange-{Language}-Sdk` label applied by CI. Review team is @chunyu3/@raych1. Must receive `BreakingChange-{Language}-Sdk-Approved` before merge.
+**SDK-level breaking changes** (`BreakingChange-{Language}-Sdk`): Applied by CI when generated SDK has breaking changes. Applies to both ARM and data-plane specs. Currently only ARM has the SDK breaking change review workflow enabled. For data-plane, this label is not applied today.
 
-**Data-plane spec-level breaking changes**: The `BreakingChangeReviewRequired` label is applied on data-plane spec PRs too, but the review team and routing are not defined. Open question: Who reviews data-plane spec-level breaking changes? This is tracked as part of [Gap #9](#gap-tracker) (REST API spec review gates).
-
-**Impact**: Breaking change releases blocked until approved.
-
-**Workaround**: Agent helps prepare suppression decorators with clear reasons.
+**Impact**: Breaking change releases blocked until approved (where review workflow exists).
 
 </details>
 
